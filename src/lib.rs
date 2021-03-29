@@ -4,10 +4,22 @@ pub mod sim;
 pub mod output;
 pub mod cli;
 pub mod constants;
+pub mod identity;
+pub mod collections;
+
+/// Development tool for testing purposes only, shouldn't be in functional binary, add a compile_error!() to this later
+macro_rules! soft_unimplemented {
+    () => {
+        println!("WARNING: UNFINISHED IMPLEMENTATION LINE {} IN {}", std::line!(), String::from(std::file!()).to_ascii_uppercase());
+    };
+}
+
+#[macro_use]
+pub mod world;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //
-// Diary
+// Diary (Todo)
 // 
 // Mar 14th
 // 1. [x] Clean up some code paths that are unimplemented or could use additional checks/fix naked unwraps/expects
@@ -23,21 +35,36 @@ pub mod constants;
 // Mar 18th
 // 1. [x] Handle named objects better. Can more than one object have the same name? Probably
 // 2. [x] Improve OutputDevice console output
-// 3. [x] Refactor project files
+// 3. [x] Refactor project into multiple source files
 // 
 // Mar 19th
 // 1. [ ] Improve physics body construction with more uniform interface, less clutter
+// 2. [x] Implement memory-use tracking, add it to OutputDevice
+//
+// Mar 20th
+// 1. [x] Refactor PhysicsBody into multiple structures with fields grouped by association
 // 
+// Mar 21st
+// 1. [ ] Refactor Simulation such that immutable copy of present state is stored as "fact", and
+//        the next state currently being calculated is passed around
+//
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // 
+// Wishlist
+// 
+// [ ] Divide and conquer force calculations where possible
+// [ ] Triple buffer physics frames
+// [ ] Easy way to fetch relative body that automatically takes account most influential nearby bodies
+// [ ] Floating origin
 // 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // 
 // Notes
 // 
-// Idea: "Event Tape", a timestamped linear tape of every event that happens in combat, with tags for filtering
+// Idea: "Event Tape", a timestamped linear tape of every event that happens, with tags for filtering
 // Idea: "Adaptive Time Collision", starting with a basis timestep, test if two objects will pass through, reset
 //        everything and then run the frame again with this halved timestep, repeat until collisions can be resolved
-//
+// 
 // Some numbers:
 // Rg_muzzle: 37400m/s
 // Pd_muzzle: 1120m/s
@@ -65,4 +92,6 @@ pub mod constants;
 //  3. At each frame you remove the first collision and see if it’s been invalidated (by storing the last processed
 //     action’s timestamp in each object). If it’s still legit, you update the state for the colliding objects
 //     (meaning you also put all their collisions with other objects in the queue). Repeat until you’ve caught up with the present.
-
+//
+//
+//

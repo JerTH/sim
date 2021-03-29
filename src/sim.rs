@@ -1,61 +1,135 @@
-use std::{ collections::HashMap, hash::Hash };
+use std::{collections::HashMap, hash::Hash, iter::Zip, slice::{Iter, IterMut}};
 use crate::{ math::*, output::*, constants::* };
 
-#[derive(Debug, Clone)]
-pub struct PhysicsBody {
-    pub mass: f64, // kg
-    pub bounding_radius: f64, // m
-    pub position: Vec3, // m
-    pub velocity: Vec3, // m/s
-    pub acceleration: Vec3, // m/s^2
-    pub net_force: Vec3, // N
-    pub orientation: Quat, // quat
-    pub angular_velocity: Vec3, // rad/s
-    pub gravitational_parameter: f64, // m^3 * s^-2
-    pub physics_category: PhysicsCategory, // todo: refactor this out into the simulation
+#[derive(Debug, Clone, Default)]
+pub struct PhysKinematic {
+    _physcategory: PhysicsCategory, // the physics processing category
+    _position: DVec3, // position in 3D space
+    _velocity: SVec3, // velocity in 3D space
+    _acceleration: SVec3, // acceleration in 3D space
+    _radius: f32, // minimum bounding radius of the body
+    _mass: f64, // mass in kg
 }
 
-impl PhysicsBody {
-    fn new() -> PhysicsBody {
-        PhysicsBody {
-            mass: 1.0f64,
-            bounding_radius: 0.0f64,
-            position: Vec3::zero(),
-            velocity: Vec3::zero(),
-            acceleration: Vec3::zero(),
-            net_force: Vec3::zero(),
-            orientation: Quat::zero(),
-            angular_velocity: Vec3::zero(),
-            gravitational_parameter: 0.0,
-            physics_category: PhysicsCategory::Dynamic,
-        }
+impl PhysKinematic {
+    fn translate(&mut self, translation: DVec3) {
+        self._position += translation
+    }
+    
+    fn time_adjusted_bounding_radius(&self, dt: f32) -> f64 {
+        ((2.0 * self._radius) + (self._velocity.magnitude() * dt) + (self._acceleration.magnitude() * dt * dt * 0.5)) as f64
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhysDynamic {
+    _f_independent: SVec3, // spatially independent forces
+    _f_spatially_dep: SVec3, // position dependent forces
+    _f_velocity_dep: SVec3, // velocity dependent forces
+    _f_torque: SVec3, // torque
+    _grav_param: f64, // standard gravitational param
+}
+
+impl PhysDynamic {
+    pub fn fnet(&self) -> SVec3 {
+        self._f_independent + self._f_spatially_dep + self._f_velocity_dep
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhysRotational {
+    _orientation: Quat, // orientation of the body
+    _angular_velocity: SVec3, // angular velocity
+    _angular_acceleration: SVec3, // angular velocity
+    _inertia_tensor: SMatrix3x3,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhysCollision {
+}
+
+/// A convenience type which bundles a bodies disjoint physics data
+#[derive(Debug, Clone)]
+pub struct PhysicsBodyRef<'a> {
+    _kinematic: &'a PhysKinematic,
+    _dynamic: &'a PhysDynamic,
+    _rotation: &'a PhysRotational,
+    _collision: &'a PhysCollision,
+    _id: usize,
+}
+
+impl<'a> PhysicsBodyRef<'a> {
+    pub fn id(&self) -> usize {
+        self._id
+    }
+
+    pub fn mass(&self) -> f64 {
+        self._kinematic._mass
+    }
+
+    pub fn position(&self) -> DVec3 {
+        self._kinematic._position
+    }
+
+    pub fn velocity(&self) -> SVec3 {
+        self._kinematic._velocity
+    }
+
+    pub fn acceleration(&self) -> SVec3 {
+        self._kinematic._acceleration
+    }
+
+    pub fn momentum(&self) -> f64 {
+        self._kinematic._velocity.magnitude() as f64 * self._kinematic._mass
     }
 
     pub fn kinetic_energy(&self) -> f64 {
-        let velocity = self.velocity.magnitude();
-        0.5 * self.mass * velocity * velocity
+        let velocity = self._kinematic._velocity.magnitude() as f64;
+        0.5 * self._kinematic._mass * velocity * velocity
+    }
+    
+    pub fn physics_category(&self) -> PhysicsCategory {
+        self._kinematic._physcategory
     }
 
-    pub fn bounding_distance_to(&self, other: &PhysicsBody) -> f64 {
-        self.position.length_to(&other.position) - self.bounding_radius - other.bounding_radius
+    pub fn bounding_distance_to(&self, other: &PhysicsBodyRef) -> f64 {
+        let p_this = self._kinematic._position;
+        let r_this = other._kinematic._radius as f64;
+        let p_other = other._kinematic._position;
+        let r_other = other._kinematic._radius as f64;
+        p_this.length_to(&p_other) - r_this - r_other
+    }
+
+    pub fn centers_distance_to(&self, other: &PhysicsBodyRef) -> f64 {
+        self._kinematic._position.length_to(&other._kinematic._position)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PhysicsFrame {
-    time: f64,
-    named: HashMap<String, Vec<usize>>,
-    objects: Vec<PhysicsBody>,
+    spatial: Vec<PhysKinematic>,
+    forces: Vec<PhysDynamic>,
+    rotations: Vec<PhysRotational>,
+    collisions: Vec<PhysCollision>,
+    name_index: HashMap<String, Vec<usize>>,
     frame_number: usize,
+    simtime: f64,
+    timestep: f64,
+
+    // implement some spatial partitioning structure when necessary
 }
 
 impl PhysicsFrame {
-    pub fn new(t: f64) -> Self {
+    pub fn new() -> Self {
         PhysicsFrame {
-            time: t,
-            objects: Vec::new(),
-            named: HashMap::new(),
+            spatial: Vec::new(),
+            forces: Vec::new(),
+            rotations: Vec::new(),
+            collisions: Vec::new(),
+            name_index: HashMap::new(),
             frame_number: 0,
+            simtime: 0.0,
+            timestep: 0.0,
         }
     }
 
@@ -63,41 +137,186 @@ impl PhysicsFrame {
         self.frame_number
     }
 
-    pub fn frame_time(&self) -> f64 {
-        self.time
+    pub fn sim_time(&self) -> f64 {
+        self.simtime
     }
 
-    pub fn bodies(&self) -> &Vec<PhysicsBody> {
-        &self.objects
+    pub fn time_step(&self) -> f64 {
+        self.timestep
     }
 
-    pub fn add_object(&mut self, obj: PhysicsBody, name: Option<&str>) -> usize {
-        let id = self.objects.len();
-        self.objects.push(obj);
-        
-        if let Some(name) = name {
-            self.named.entry(name.to_ascii_uppercase()).or_default().push(id);
+    pub fn bodies(&self) -> &Vec<PhysicsBodyRef> {
+        unimplemented!() // previous implementation removed for now, turn this into an iterator???
+    }
+    
+    pub fn get_body_ref(&self, id: usize) -> Option<PhysicsBodyRef> {
+        if let (Some(s), Some(f), Some(r), Some(c)) = self.physics_data_from_id(id) {
+            Some(PhysicsBodyRef {
+                _kinematic: s,
+                _dynamic: f,
+                _rotation: r,
+                _collision: c,
+                _id: id,
+            })
+        } else {
+            None
         }
+    }
+    
+    pub fn get_named_bodies(&self, name: &str) -> Vec<PhysicsBodyRef> {
+        let name = name.to_ascii_uppercase();
+        if let Some(ids) = self.name_index.get(name.as_str()) {
+            let mut result = Vec::new();
+            for id in ids {
+                if let Some(body_ref) = self.get_body_ref(*id) {
+                    result.push(body_ref);
+                }
+            }
+            result
+        } else {
+            Vec::default()
+        }
+    }
+
+    pub fn kinematic_data(&self) -> std::slice::Iter<PhysKinematic> {
+        self.spatial.iter()
+    }
+
+    pub fn dynamic_data(&self) -> std::slice::Iter<PhysDynamic> {
+        self.forces.iter()
+    }
+
+    pub fn dynamic_data_mut(&mut self) -> std::slice::IterMut<PhysDynamic> {
+        self.forces.iter_mut()
+    }
+
+    pub fn rotation_data(&self) -> std::slice::Iter<PhysRotational> {
+        self.rotations.iter()
+    }
+
+    pub fn rotation_data_mut(&mut self) -> std::slice::IterMut<PhysRotational> {
+        self.rotations.iter_mut()
+    }
+
+    pub fn collision_data(&self) -> std::slice::Iter<PhysCollision> {
+        self.collisions.iter()
+    }
+
+    pub fn collision_data_mut(&mut self) -> std::slice::IterMut<PhysCollision> {
+        self.collisions.iter_mut()
+    }
+
+    pub fn spatial_data_mut(&mut self) -> std::slice::IterMut<PhysKinematic> {
+        self.spatial.iter_mut()
+    }
+    
+    pub fn dynamic_integration_data(&self) -> Zip<Iter<PhysKinematic>, Iter<PhysDynamic>> {
+        self.spatial.iter().zip(self.forces.iter())
+    }
+
+    pub fn dynamic_integration_data_mut(&mut self) -> Zip<IterMut<PhysKinematic>, IterMut<PhysDynamic>> {
+        self.spatial.iter_mut().zip(self.forces.iter_mut())
+    }
+
+    pub fn make_physics_body(&mut self) -> PhysicsBodyBuilder {
+        PhysicsBodyBuilder {
+            _reference_frame: self,
+            _template: None,
+            _physics_category: None,
+            _name: None,
+            _velocity: None,
+            _position: None,
+            _orientation: None,
+            _angular_velocity: None,
+            _mass: None,
+            _bounding_radius: None,
+            _grav_param: None,
+            _relative_body_id: None,
+            _with_relative_rotation: false,
+        }
+    }
+
+    pub fn add_named_physics_body(&mut self, body: PhysicsBodyRef, name: String) -> usize {
+        let id = self.add_physics_body(body);
+        let name = name.to_ascii_uppercase();
+        self.name_index.entry(name).or_default().push(id);
+        return id
+    }
+
+    pub fn add_physics_body(&mut self, body: PhysicsBodyRef) -> usize {
+        let id = self.spatial.len();
+        assert_eq!(id, self.forces.len());
+        assert_eq!(id, self.rotations.len());
+        assert_eq!(id, self.collisions.len()); // until we have a more sophisticaed impl, just assert that our arrays stay the same length
+
+        self.spatial.push(body._kinematic.clone());
+        self.forces.push(body._dynamic.clone());
+        self.rotations.push(body._rotation.clone());
+        self.collisions.push(body._collision.clone());
+        
         return id;
+    }
+
+    pub fn physics_data_from_id(&self, id: usize) -> (Option<&PhysKinematic>, Option<&PhysDynamic>, Option<&PhysRotational>, Option<&PhysCollision>) {
+        (
+            self.spatial.get(id),
+            self.forces.get(id),
+            self.rotations.get(id), // cant do this due to RefCell
+            self.collisions.get(id),
+        )
+    }
+
+    pub fn translate_origin(&mut self, translation: DVec3) {
+        for spatial_data in self.spatial_data_mut() {
+            spatial_data.translate(translation);
+        }
+    }
+
+    pub fn get_data<'a, T: UpdateData<'a>>() -> (<T as UpdateData<'a>>::Reads, <T as UpdateData<'a>>::Writes) {
+        unimplemented!()
+    }
+}
+
+pub trait UpdateData<'a> {
+    type Reads;
+    type Writes;
+
+    fn update(reads: Self::Reads, writes: Self::Writes);
+}
+
+struct TranslationSystem;
+impl<'a> UpdateData<'a> for TranslationSystem {
+    type Reads = ();
+    type Writes = (&'a mut PhysKinematic, &'a mut PhysDynamic);
+
+    fn update(reads: Self::Reads, data: Self::Writes) {
+        
     }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum PhysicsCategory {
     Gravitational, // generally large bodies, affected by gravity, and also affect everything else with gravity
-    Dynamic, // objects which are affected by gravity but do not affect other objects with gravity
+    Dynamic, // objects which are affected by gravity but do not have a gravitational influence of their own
+}
+
+impl Default for PhysicsCategory {
+    fn default() -> Self {
+        Self::Dynamic
+    }
 }
 
 pub struct PhysicsBodyBuilder<'a> {
-    __sim: &'a mut Simulation,
-    _template: Option<PhysicsBody>,
-    _category: Option<PhysicsCategory>,
+    _reference_frame: &'a mut PhysicsFrame,
+    _template: Option<PhysicsBodyRef<'a>>,
+    _physics_category: Option<PhysicsCategory>,
     _name: Option<String>,
-    _vel: Option<Vec3>,
-    _pos: Option<Vec3>,
-    _rot: Option<Vec3>,
+    _velocity: Option<SVec3>,
+    _position: Option<DVec3>,
+    _orientation: Option<Quat>,
+    _angular_velocity: Option<SVec3>,
     _mass: Option<f64>,
-    _radius: Option<f64>,
+    _bounding_radius: Option<f32>,
     _grav_param: Option<f64>,
     _relative_body_id: Option<usize>,
     _with_relative_rotation: bool,
@@ -109,14 +328,34 @@ impl<'a> PhysicsBodyBuilder<'a> {
         self
     }
 
-    pub fn with_transform(mut self, pos: Vec3, rot: Option<Vec3>) -> Self {
-        self._pos = Some(pos);
-        self._rot = rot;
+    pub fn with_transform(mut self, pos: DVec3, rot: Option<Quat>) -> Self {
+        self._position = Some(pos);
+        self._orientation = rot;
         self
     }
 
-    pub fn with_velocity(mut self, vel: Vec3) -> Self {
-        self._vel = Some(vel);
+    pub fn with_velocity(mut self, vel: SVec3) -> Self {
+        self._velocity = Some(vel);
+        self
+    }
+
+    pub fn with_mass(mut self, mass: f64) -> Self {
+        self._mass = Some(mass);
+        self
+    }
+
+    pub fn with_grav_param(mut self, standard_gravitational_parameter: f64) -> Self {
+        self._grav_param = Some(standard_gravitational_parameter);
+        self
+    }
+
+    pub fn with_bounding_radius(mut self, bounding_radius: f32) -> Self {
+        self._bounding_radius = Some(bounding_radius);
+        self
+    }
+
+    pub fn with_physics_category(mut self, physics_category: PhysicsCategory) -> Self {
+        self._physics_category = Some(physics_category);
         self
     }
 
@@ -127,19 +366,36 @@ impl<'a> PhysicsBodyBuilder<'a> {
 
     /// Constructs then validates and adds a new PhysicsBody to the simulation
     pub fn add(self) -> usize {
-        let template = self._template.clone().unwrap_or(PhysicsBody::new());
-        let mut body = template.clone();
+        let mut frame = self._reference_frame;
         
-        body.mass = self._mass.unwrap_or(template.mass);
-        body.bounding_radius = self._radius.unwrap_or(template.bounding_radius);
-        body.position = self._pos.unwrap_or(template.position);
-        body.velocity = self._vel.unwrap_or(template.velocity);
-
+        let mut kinematic = PhysKinematic {
+            _physcategory: self._physics_category.unwrap_or(PhysicsCategory::default()),
+            _radius: self._bounding_radius.unwrap_or(0.0f32),
+            _position: self._position.unwrap_or(DVec3::default()),
+            _velocity: self._velocity.unwrap_or(SVec3::default()),
+            _acceleration: SVec3::default(),
+            _mass: self._mass.unwrap_or(1.0f64),
+        };
+        let mut dynamic = PhysDynamic {
+            _grav_param: self._grav_param.unwrap_or(self._mass.unwrap_or(1.0f64) * G),
+            _f_independent: SVec3::default(),
+            _f_spatially_dep: SVec3::default(),
+            _f_velocity_dep: SVec3::default(),
+            _f_torque: SVec3::default(),
+        };
+        let mut rotation = PhysRotational {
+            _orientation: self._orientation.unwrap_or(Quat::default()),
+            _angular_velocity: self._angular_velocity.unwrap_or(SVec3::default()),
+            _angular_acceleration: SVec3::default(),
+            _inertia_tensor: SMatrix3x3::default(),
+        };
+        let mut collision = PhysCollision::default();
+        
         // add the relative bodies transform and velocity
         if let Some(id) = self._relative_body_id {
-            if let Some(relative_body) = self.__sim.body_from_id(id) {
-                body.position += relative_body.position;
-                body.velocity += relative_body.velocity;
+            if let (Some(relative_body_spatial), _, _, _) = frame.physics_data_from_id(id) {
+                kinematic._position += relative_body_spatial._position;
+                kinematic._velocity += relative_body_spatial._velocity;
 
                 if self._with_relative_rotation {
                     unimplemented!("Relative rotation is not implemented");
@@ -147,22 +403,21 @@ impl<'a> PhysicsBodyBuilder<'a> {
             }
         }
         
-        body.gravitational_parameter = if let Some(grav_param) = self._grav_param {
-            grav_param
-        } else {
-            body.mass * G
-        };
-
         // TODO HERE: VALIDATE THE BODY PARAMETERS
         
-        // are we inserting into a running simulation?
-        if self.__sim.present_state.time > 0.0 {
-            unimplemented!("Adding physics bodies during a running simulation is not implemented")
+        let body = PhysicsBodyRef {
+            _kinematic: &kinematic,
+            _dynamic: &dynamic,
+            _rotation: &rotation,
+            _collision: &collision,
+            _id: 0usize,
+        };
+
+        
+        if let Some(name) = self._name {
+            return frame.add_named_physics_body(body, name)
         } else {
-            let id = self.__sim.initial_state.add_object(body, self._name.as_deref());
-            self.__sim.present_state = self.__sim.initial_state.clone();
-            self.__sim.previous_state = self.__sim.initial_state.clone();
-            return id;
+            return frame.add_physics_body(body)
         }
     }
 }
@@ -182,9 +437,7 @@ pub enum TerminationCondition {
 
 #[derive(Debug)]
 pub struct Simulation {
-    initial_state: PhysicsFrame,
     present_state: PhysicsFrame,
-    previous_state: PhysicsFrame,
     timestep: f64, // seconds
     integration_method: IntegrationMethod,
     termination_conditions: Vec<TerminationCondition>,
@@ -194,9 +447,7 @@ pub struct Simulation {
 impl Simulation {
     pub fn new() -> Simulation {
         Simulation {
-            initial_state: PhysicsFrame::new(0.0),
-            present_state: PhysicsFrame::new(0.0),
-            previous_state: PhysicsFrame::new(0.0),
+            present_state: PhysicsFrame::new(),
             timestep: 1.0f64,
             integration_method: IntegrationMethod::VelocityVerlet,
             termination_conditions: Vec::new(),
@@ -204,67 +455,37 @@ impl Simulation {
         }
     }
 
-    pub fn present_frame(&self) -> &PhysicsFrame {
+    pub fn make_physics_body(&mut self) -> PhysicsBodyBuilder {
+        self.present_state.make_physics_body()
+    }
+
+    pub fn present(&self) -> &PhysicsFrame {
         &self.present_state
-    }
-
-    pub fn body_from_id(&self, id: usize) -> Option<&PhysicsBody> {
-        self.present_state.objects.get(id)
-    }
-
-    pub fn bodies_with_name(&self, name: &str) -> Vec<(usize, &PhysicsBody)> {
-        let mut result = Vec::new();
-        if let Some(body_ids) = self.present_state.named.get(name.to_ascii_uppercase().as_str()) {
-            for id in body_ids {
-                if let Some(body) = self.present_state.objects.get(*id) {
-                    result.push((*id, body));
-                }
-            }
-        }
-        result
-    }
-
-    fn set_global_timestep(&mut self, t: f64) {
-        self.timestep = t;
     }
 
     pub fn set_output_device(&mut self, device: OutputDevice) {
         self.output_device = Some(device)
     }
-    
-    pub fn make_physics_body_from_template(&mut self, template: PhysicsBody) -> PhysicsBodyBuilder {
-        PhysicsBodyBuilder {
-            __sim: self,
-            _template: Some(template),
-            _category: None,
-            _name: None,
-            _vel: None,
-            _pos: None,
-            _rot: None,
-            _mass: None,
-            _radius: None,
-            _grav_param: None,
-            _relative_body_id: None,
-            _with_relative_rotation: false,
-        }
-    }
 
     pub fn system_kinetic_energy(&self) -> f64 {
         let mut sum = 0.0;
-        for body in self.present_state.objects.iter() {
-            let v = body.velocity.magnitude();
-            sum += (body.mass / 2.0) * (v * v);
+        let data = self.present().kinematic_data();
+
+        for body in data {
+            let v = body._velocity.magnitude() as f64;
+            sum += (body._mass / 2.0) * (v * v);
         }
         sum
     }
-
+    
     pub fn system_potential_energy(&self) -> f64 {
         let mut sum = 0.0;
         // calculate gravitational potential energy
-        for (i, body) in self.present_state.objects.iter().enumerate() {
-            for (k, other) in self.present_state.objects.iter().enumerate() {
+        
+        for (i, body) in self.present().kinematic_data().enumerate() {
+            for (k, other) in self.present().kinematic_data().enumerate() {
                 if i != k {
-                    sum += -(G * other.mass * body.mass) / other.position.length_to(&body.position);
+                    sum += -(G * other._mass * body._mass) / other._position.length_to(&body._position);
                 }
             }
         }
@@ -273,43 +494,61 @@ impl Simulation {
 
     pub fn system_total_mass(&self) -> f64 {
         let mut sum = 0.0;
-        for body in self.present_state.objects.iter() {
-            sum += body.mass;
+        for body in self.present().kinematic_data() {
+            sum += body._mass;
         }
         sum
     }
+    
+    // TODO: DIVIDE AND CONQUER FORCE CALCULATIONS WHERE POSSIBLE
+    pub fn calculate_independent_forces(&self) {
+        unimplemented!();
+    }
 
-    pub fn calculate_gravitational_forces(&mut self) {
-        let bodies_other = &self.present_state.objects.clone();
-        let bodies_now = &mut self.present_state.objects;
+    pub fn calculate_spatially_dependent_forces(&self, frame: &mut PhysicsFrame) {
+        self.calculate_gravitational_forces(frame);
+    }
 
-        for (i, body) in bodies_now.iter_mut().enumerate() {
-            for (k, body_other) in bodies_other.iter().enumerate() {
+    pub fn calculate_velocity_dependent_forces(&self) {
+        unimplemented!();
+    }
+    
+    pub fn calculate_gravitational_forces(&self, frame: &mut PhysicsFrame) {
+        let new_data = frame.dynamic_integration_data_mut();        
+        for (i, (new_body_kinematic, new_body_dynamic)) in new_data.enumerate() {
+
+            let old_data = self.present().dynamic_integration_data();
+            for (k, (old_body_kinematic, old_body_dynamic)) in old_data.enumerate() {
+                
                 // only collect gravitational influences from gravitational bodies
-                if body_other.physics_category == PhysicsCategory::Gravitational {
+                if old_body_kinematic._physcategory == PhysicsCategory::Gravitational {
                     // don't impart forces on yourself
                     if i != k { 
                         // F = G ((m1 * m2) / r^2)
-                        let r = Vec3::length_to(&body_other.position, &body.position);
-                        let m2 = body.mass;
-                        let f = (body_other.gravitational_parameter * m2) / (r * r);
-                        body.net_force += body.position.normal_vector_toward(&body_other.position) * f;
+                        let r = DVec3::length_to(&old_body_kinematic._position, &new_body_kinematic._position);
+                        let m2 = new_body_kinematic._mass;
+                        let f = (old_body_dynamic._grav_param * m2) / (r * r);
+                        new_body_dynamic._f_spatially_dep += (new_body_kinematic._position.normal_vector_toward(&old_body_kinematic._position) * f).into();
                     }
                 }
             }
         }
     }
-
-    fn clear_forces(&mut self) {
-        for mut body in &mut self.present_state.objects {
-            body.net_force = Vec3::zero();
+    
+    fn clear_spatially_dependent_forces(&self, frame: &mut PhysicsFrame) {
+        for body in frame.dynamic_data_mut() {
+            body._f_spatially_dep = SVec3::zero();
+            body._f_velocity_dep = SVec3::zero();
         }
     }
 
-    fn clear_accelerations_and_forces(&mut self) {
-        for mut body in &mut self.present_state.objects {
-            body.acceleration = Vec3::zero();
-            body.net_force = Vec3::zero();
+    fn clear_accelerations_and_spatially_dependent_forces(&self, frame: &mut PhysicsFrame) {
+        let data = frame.dynamic_integration_data_mut();
+
+        for (body_kinematic, body_dynamic) in data {
+            body_kinematic._acceleration = SVec3::zero();
+            body_dynamic._f_spatially_dep = SVec3::zero();
+            body_dynamic._f_velocity_dep = SVec3::zero();
         }
     }
 
@@ -322,67 +561,67 @@ impl Simulation {
     pub fn step_simulation(&mut self) {
         // step 1: compute possible collisions and the exact time/position they occur
         //         treat acceleration as being constant during this step. quadratic root finding
-
-
+        let mut frame = self.present().clone();
 
         // step 2: integrate accelerations and velocities
         match self.integration_method {
             IntegrationMethod::Euler => {
-                self.clear_accelerations_and_forces();
-                self.calculate_gravitational_forces();
+                self.clear_accelerations_and_spatially_dependent_forces(&mut frame);
+                self.calculate_spatially_dependent_forces(&mut frame);
 
-                for body in &mut self.present_state.objects {
-                    body.acceleration = body.net_force / body.mass;
-                    body.position += body.velocity * self.timestep; // position then velocity
-                    body.velocity += body.acceleration * self.timestep;
+                for (body_kinematic, body_dynamic) in frame.dynamic_integration_data_mut() {
+                    body_kinematic._acceleration = body_dynamic.fnet() / body_kinematic._mass;
+                    body_kinematic._position += (body_kinematic._velocity * self.timestep).into(); // position then velocity
+                    body_kinematic._velocity += body_kinematic._acceleration * self.timestep;
                 }
             }
 
             IntegrationMethod::SemiImplicitEuler => {
-                self.clear_accelerations_and_forces();
-                self.calculate_gravitational_forces();
+                self.clear_accelerations_and_spatially_dependent_forces(&mut frame);
+                self.calculate_spatially_dependent_forces(&mut frame);
 
-                for body in &mut self.present_state.objects {
-                    body.acceleration = body.net_force / body.mass;
-                    body.velocity += body.acceleration * self.timestep; // velocity then position
-                    body.position += body.velocity * self.timestep;
+                for (body_kinematic, body_dynamic) in frame.dynamic_integration_data_mut() {
+                    body_kinematic._acceleration = body_dynamic.fnet() / body_kinematic._mass;
+                    body_kinematic._velocity += body_kinematic._acceleration * self.timestep;
+                    body_kinematic._position += (body_kinematic._velocity * self.timestep).into(); // velocity then position
                 }
             }
 
             IntegrationMethod::VelocityVerlet => {
-                self.clear_accelerations_and_forces();
-                self.calculate_gravitational_forces();
+                self.clear_accelerations_and_spatially_dependent_forces(&mut frame);
+                self.calculate_spatially_dependent_forces(&mut frame);
 
                 // integrate velocities first
-                for body in &mut self.present_state.objects {
+                for (body_kinematic, body_dynamic) in frame.dynamic_integration_data_mut() {
                     let dt = self.timestep; // dT
-                    let p = body.position; // p(T)
-                    let v = body.velocity; // v(T)
-                    let a = body.net_force / body.mass; // a(T)
+                    let p = body_kinematic._position; // p(T)
+                    let v = body_kinematic._velocity; // v(T)
+                    let a = body_dynamic.fnet() / body_kinematic._mass; // a(T)
 
-                    body.position = p + (v * dt) + 0.5 * a * (dt * dt);
-                    body.acceleration = a;
+                    body_kinematic._position = p + (v * dt) + 0.5 * a * (dt * dt);
+                    body_kinematic._acceleration = a;
                 }
-
-                self.clear_forces();
-                self.calculate_gravitational_forces(); // recalculate forces for new accelerations
+                
+                self.clear_spatially_dependent_forces(&mut frame);
+                self.calculate_spatially_dependent_forces(&mut frame); // recalculate forces for new accelerations
 
                 // integrate new accelerations sampled at the beginning and end of the timestep
-                for body in &mut self.present_state.objects {
+                for (body_kinematic, body_dynamic) in frame.dynamic_integration_data_mut() {
                     let dt = self.timestep; // dT
-                    let v = body.velocity; // v(T)
-                    let a = body.acceleration; // a(T) // we saved the accelerations we calculated initially here
-                    let aa = body.net_force / body.mass; // a(T + dT) // we already changed p(T) to p(T + dT), so we have new p(T) accelerations
+                    let v = body_kinematic._velocity; // v(T)
+                    let a = body_kinematic._acceleration; // a(T) // we saved the accelerations we calculated initially here
+                    let b = body_dynamic.fnet() / body_kinematic._mass; // a(T + dT) // we already changed p(T) to p(T + dT), so we have new p(T) accelerations
 
-                    body.velocity = v + 0.5 * (a + aa) * dt;
-                    body.acceleration = aa;
+                    body_kinematic._velocity = v + 0.5 * (a + b) * dt;
+                    body_kinematic._acceleration = b;
                 }
             }
         }
-
-        self.present_state.time += self.timestep;
-        self.present_state.frame_number += 1;
-        self.previous_state = self.present_state.clone();
+        
+        frame.timestep = self.timestep;
+        frame.simtime += self.timestep;
+        frame.frame_number += 1;
+        self.present_state = frame;
     }
     
     fn test_termination_conditions(&self) -> bool {
@@ -393,7 +632,7 @@ impl Simulation {
             for condition in self.termination_conditions.iter() {
                 match condition {
                     TerminationCondition::ElapsedTime(t) => {
-                        return self.present_state.time < *t
+                        return self.present().simtime < *t
                     },
                     _ => {
                         return true
@@ -408,11 +647,35 @@ impl Simulation {
     pub fn run(&mut self) {
         while self.test_termination_conditions() {
             self.step_simulation();
-            if let Some(output) = &self.output_device {
+            if let Some(output) = self.output_device.as_ref() {
                 output.output(&self);
             }
         }
     }
 }
 
+impl MemUse for PhysicsFrame {
+    fn memory_use(&self) -> usize {
+        let mut total = 0;
+        total += ::std::mem::size_of_val(&self.spatial);
+        total += ::std::mem::size_of_val(&self.forces);
+        total += ::std::mem::size_of_val(&self.rotations);
+        total += ::std::mem::size_of_val(&self.collisions);
+        total += ::std::mem::size_of_val(&self.name_index);
+        total += ::std::mem::size_of_val(&self.frame_number);
+        total += ::std::mem::size_of_val(&self.simtime);
+        total
+    }
+}
 
+impl MemUse for Simulation {
+    fn memory_use(&self) -> usize {
+        let mut total = 0;
+        total += self.present_state.memory_use();
+        total += ::std::mem::size_of_val(&self.timestep);
+        total += ::std::mem::size_of_val(&self.integration_method);
+        total += ::std::mem::size_of_val(&self.termination_conditions);
+        total += if let Some(device) = &self.output_device { device.memory_use() } else { ::std::mem::size_of_val(&self.output_device) };
+        total
+    }    
+}

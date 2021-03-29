@@ -1,5 +1,4 @@
-use std::ops::{ Add, AddAssign, Deref, SubAssign };
-use clap::ArgMatches;
+use std::ops::{ AddAssign, SubAssign };
 use crate::sim::*;
 
 #[derive(Debug, Clone)]
@@ -29,6 +28,21 @@ enum OutputField {
     Velocity,
     Acceleration,
     Time,
+    MemoryUse,
+}
+
+#[derive(Debug, Clone)]
+enum OutputFrequency {
+    EveryFrame,
+    Hertz(f64),
+    Frames(f64),
+    SimTime(f64),
+}
+
+impl Default for OutputFrequency {
+    fn default() -> Self {
+        OutputFrequency::EveryFrame
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,6 +51,7 @@ pub struct OutputDevice {
     format: OutputFormat,
     tracked_bodies: Vec<(String, usize, Vec<OutputField>)>,
     global_fields: Vec<OutputField>,
+    frequency: OutputFrequency,
 }
 
 // system energy in J/kg = (system_kinetic_energy + system_potential_energy) / system_total_mass
@@ -44,6 +59,7 @@ pub struct OutputDevice {
 impl OutputDevice {
 
     // TODO: ISOLATE CLI STUFF TO CLI.RS
+
     pub fn from_cli_config(sim: &Simulation, matches: &clap::ArgMatches) -> OutputDevice {
         let mut device = OutputDevice::default();
         if let Some(matches) = matches.subcommand_matches("simparams") {
@@ -65,6 +81,7 @@ impl OutputDevice {
                 if matches.is_present("potentialenergy") { device.global_fields.push(OutputField::PotentialEnergy); }
                 if matches.is_present("frames") { device.global_fields.push(OutputField::Frames); }
                 if matches.is_present("time") { device.global_fields.push(OutputField::Time); }
+                if matches.is_present("memoryuse") { device.global_fields.push(OutputField::MemoryUse); }
 
                 if let Some(matches) = matches.subcommand_matches("track") {
                     let mut tracked_fields = Vec::new();
@@ -76,8 +93,9 @@ impl OutputDevice {
 
                     if let Some(targets) = matches.values_of("target") {
                         for target in targets {
-                            for body in sim.bodies_with_name(target) {
-                                device.tracked_bodies.push((target.to_ascii_uppercase(), body.0, tracked_fields.clone()));
+                            for body in sim.present().get_named_bodies(target) {
+                                println!("{:#?}", body);
+                                device.tracked_bodies.push((target.to_ascii_uppercase(), body.id(), tracked_fields.clone()));
                             }
                         }
                     }
@@ -86,8 +104,27 @@ impl OutputDevice {
         }
         device
     }
-
+    
     pub fn output(&self, sim: &Simulation) {
+        match self.frequency {
+            OutputFrequency::EveryFrame => {
+                // do nothing
+            },
+            OutputFrequency::Hertz(f) => {
+                unimplemented!();
+            },
+            OutputFrequency::Frames(f) => {
+                if sim.present().frame_number() % f as usize > 0 {
+                    return
+                }
+            },
+            OutputFrequency::SimTime(f) => {
+                if sim.present().sim_time() % f >= (sim.present().time_step()) {
+                    return
+                }
+            }
+        }
+
         println!("------------------------------------------");
         let mut indent = 0;
         let indent_str = "  ";
@@ -98,7 +135,11 @@ impl OutputDevice {
                     println!("{}System Total Energy: {:09.04}{}J/Kg", indent_str.repeat(indent), e, ep);
                 },
                 OutputField::Frames => {
-                    println!("{}Frame: {}", indent_str.repeat(indent), sim.present_frame().frame_number());
+                    println!("{}Frame: {}", indent_str.repeat(indent), sim.present().frame_number());
+                },
+                OutputField::MemoryUse => {
+                    let (m, mp) = format_mem_value(sim.memory_use());
+                    println!("{}Memory Use: {:.04}{}B", indent_str.repeat(indent), m, mp);
                 },
                 _ => {
                     continue; // unhandled/not applicable field type
@@ -108,37 +149,39 @@ impl OutputDevice {
 
         println!("{}Tracked Bodies:", indent_str.repeat(indent));
         indent.add_assign(3);
-        for (i, tracked_body) in self.tracked_bodies.iter().enumerate() {
-            println!("{}{}", indent_str.repeat(indent), tracked_body.0);
+        for (name, body_id, fields) in self.tracked_bodies.iter() {
+            print!("{}{}", indent_str.repeat(indent), name);
             
-            if let Some(body) = sim.body_from_id(tracked_body.1) {
-                if tracked_body.2.is_empty() {
+            if let Some(body) = sim.present().get_body_ref(*body_id) {
+                println!(" ({:?})", body.physics_category());
+                
+                if fields.is_empty() {
                     println!("No Fields Tracked");
                 } else {
                     indent.add_assign(1);
-                    for field in tracked_body.2.iter() {
+                    for field in fields.iter() {
                         let i = indent_str.repeat(indent);
                         match field {
                             OutputField::KineticEnergy => {
-                                let (e, ep) = format_si_value(body.kinetic_energy() / body.mass);
+                                let (e, ep) = format_si_value(body.kinetic_energy() / body.mass());
                                 println!("{}KIN={:+09.04}{}J/kg", i, e, ep);
                             },
                             OutputField::Position => {
-                                let (x, xp) = format_si_value(body.position.x);
-                                let (y, yp) = format_si_value(body.position.y);
-                                let (z, zp) = format_si_value(body.position.z);
+                                let (x, xp) = format_si_value(body.position().x);
+                                let (y, yp) = format_si_value(body.position().y);
+                                let (z, zp) = format_si_value(body.position().z);
                                 println!("{}POS={:+09.04}{}m, {:+09.04}{}m, {:+09.04}{}m", i, x, xp, y, yp, z, zp);
                             },
                             OutputField::Velocity => {
-                                let (x, xp) = format_si_value(body.velocity.x);
-                                let (y, yp) = format_si_value(body.velocity.y);
-                                let (z, zp) = format_si_value(body.velocity.z);
+                                let (x, xp) = format_si_value(body.velocity().x as f64);
+                                let (y, yp) = format_si_value(body.velocity().y as f64);
+                                let (z, zp) = format_si_value(body.velocity().z as f64);
                                 println!("{}VEL={:+09.04}{}m/s, {:+09.04}{}m/s, {:+09.04}{}m/s", i, x, xp, y, yp, z, zp);
                             },
                             OutputField::Acceleration => {
-                                let (x, xp) = format_si_value(body.acceleration.x);
-                                let (y, yp) = format_si_value(body.acceleration.y);
-                                let (z, zp) = format_si_value(body.acceleration.z);
+                                let (x, xp) = format_si_value(body.acceleration().x as f64);
+                                let (y, yp) = format_si_value(body.acceleration().y as f64);
+                                let (z, zp) = format_si_value(body.acceleration().z as f64);
                                 println!("{}ACC={:+09.04}{}m/s^2, {:+09.04}{}m/s^2, {:+09.04}{}m/s^2", i, x, xp, y, yp, z, zp);
                             },
                             _ => {
@@ -178,5 +221,41 @@ fn format_si_value(n: f64) -> (f64, &'static str) {
             x if x.abs() > 1000000000000000000000.0 => return (x / 1000000000000000000.0, "E"),
             x => return (x, "")
         }
+    }
+}
+
+fn format_mem_value(n: usize) -> (f64, &'static str) {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
+
+    if n == 0 {
+        return (0.0, "")
+    } else {
+        match n as f64 {
+            x if (0.0..KB).contains(&x) => return (x, ""),
+            x if (KB..MB).contains(&x) => return (x / KB, "Ki"),
+            x if (MB..GB).contains(&x) => return (x / MB, "Mi"),
+            x if (GB..TB).contains(&x) => return (x / GB, "Gi"),
+            x => return (x, "")
+        }
+    }
+}
+
+impl MemUse for OutputDevice {
+    fn memory_use(&self) -> usize {
+        let mut total = 0;
+        total += ::std::mem::size_of_val(&self.target);
+        total += ::std::mem::size_of_val(&self.format);
+        total += ::std::mem::size_of_val(&self.tracked_bodies);
+        total += ::std::mem::size_of_val(&self.global_fields);
+        total
+    }
+}
+
+pub trait MemUse: Sized {
+    fn memory_use(&self) -> usize {
+        ::std::mem::size_of::<Self>()
     }
 }

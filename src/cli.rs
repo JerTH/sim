@@ -8,6 +8,12 @@ pub fn parse_command_line() -> clap::ArgMatches<'static> {
         .required(true)
         .takes_value(true)
         .possible_values(&["console", "file"]);
+    
+    let output_frequency_option = Arg::with_name("frequency")
+        .long("frequency")
+        .short("f")
+        .required(false)
+        .min_values(1);
 
     let track_targ_option = Arg::with_name("target")
         .long("target")
@@ -24,12 +30,14 @@ pub fn parse_command_line() -> clap::ArgMatches<'static> {
 
     let output_subcommand = SubCommand::with_name("output")
         .arg(output_targ_option)
+        .arg(output_frequency_option)
         .arg(Arg::with_name("totalenergy").long("totalenergy").short("e"))
         .arg(Arg::with_name("kineticenergy").long("kineticenergy").short("k"))
         .arg(Arg::with_name("potentialenergy").long("potentialenergy").short("p"))
         .arg(Arg::with_name("frames").long("frames").short("f"))
+        .arg(Arg::with_name("memoryuse").long("memuse").short("m"))
         .subcommand(track_subcommand);
-
+    
     let maxsimtime_option = Arg::with_name("maxsimtime")
         .long("maxsimtime")
         .short("t")
