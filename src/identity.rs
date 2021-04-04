@@ -1,28 +1,89 @@
-/// Typeid
+/// Identity
 
 use core::panic;
-use std::{cmp::Ordering, hash::Hash};
-use std::sync::{ RwLock, Once };
-use std::sync::atomic::{ AtomicU64, AtomicUsize };
-use std::collections::HashMap;
-use std::cell::Cell;
+use std::{
+    cmp::Ordering,
+    hash::Hash,
+    ops::Deref,
+    cell::Cell,
+    collections::HashMap,
+    sync::{atomic::{self, AtomicU64}, RwLock, Once}
+};
 
-type TypeIdMap = HashMap<core::any::TypeId, InternalTypeId>;
-struct TypeIdMapRwLock(Cell<Option<RwLock<TypeIdMap>>>);
+#[cfg_attr(any(target_arch="x86_64", target_arch="aarch64"), repr(align(128)))]
+#[cfg_attr(not(any(target_arch="x86_64", target_arch="aarch64")), repr(align(64)))]
+struct PaddedAtomicU64(AtomicU64);
+
+impl PaddedAtomicU64 {
+    const fn new(val: u64) -> Self {
+        PaddedAtomicU64(AtomicU64::new(val))
+    }
+}
+
+impl Deref for PaddedAtomicU64 {
+    type Target = AtomicU64;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 static TYPEID_INIT_ONCE: Once = Once::new();
 
 static mut TYPEID_MAP: TypeIdMapRwLock = TypeIdMapRwLock::new();
-static mut TYPEID_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static mut INSTANCEID_COUNTER: AtomicU64 = AtomicU64::new(0);
-static mut ENTITYID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static mut TYPEID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
+static mut INSTANCEID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
+static mut ENTITYID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
+static mut SYSTEMID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
+static mut LOCALEXECUTIONID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
+
+pub(crate) trait LinearId {
+    fn unique() -> Self;
+    fn as_linear_raw(&self) -> u64;
+}
+
+
+
+/// An opaque identifier used to keep track of the context of execution. This is used to uniquely identify systems,
+/// and conduct appropriate caching and filtering for query's. Modifying the contents is considered an error under all circumstances
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct LocalExecutionId(usize);
+
+impl LinearId for LocalExecutionId {
+    fn unique() -> Self {
+        LocalExecutionId(unsafe { LOCALEXECUTIONID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) as usize })
+    }
+
+    fn as_linear_raw(&self) -> u64 {
+        self.0 as u64
+    }
+}
 
 /// An opaque identifier for any given entity in the world. Corresponds to exactly one entity, alive or dead.
-struct EntityId(u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityId(usize);
 
-impl EntityId {
-    pub fn new() -> EntityId {
-        unimplemented!()
+impl LinearId for EntityId {
+    fn unique() -> EntityId {
+        EntityId(unsafe { ENTITYID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) as usize })
+    }
+
+    fn as_linear_raw(&self) -> u64 {
+        self.0 as u64
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SystemId(usize);
+
+impl LinearId for SystemId {
+    fn unique() -> SystemId {
+        SystemId(unsafe { SYSTEMID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) } as usize)
+    }
+
+    fn as_linear_raw(&self) -> u64 {
+        self.0 as u64
     }
 }
 
@@ -31,11 +92,17 @@ impl EntityId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstanceId(u64);
 
-impl InstanceId {
-    pub fn unique() -> Self {
+impl LinearId for InstanceId {
+    fn unique() -> Self {
         InstanceId (unsafe { INSTANCEID_COUNTER.fetch_add(1u64, core::sync::atomic::Ordering::SeqCst) } )
     }
+
+    fn as_linear_raw(&self) -> u64 {
+        self.0
+    }
 }
+
+struct TypeIdMapRwLock(Cell<Option<RwLock<HashMap<core::any::TypeId, InternalTypeId>>>>);
 
 impl TypeIdMapRwLock {
     const fn new() -> Self {
@@ -43,11 +110,11 @@ impl TypeIdMapRwLock {
     }
 }
 
-fn init_typeid_map() -> RwLock<TypeIdMap> {
+fn init_typeid_map() -> RwLock<HashMap<core::any::TypeId, InternalTypeId>> {
     RwLock::new(core::default::Default::default())
 }
 
-unsafe fn get_typeid_map() -> &'static RwLock<TypeIdMap> {
+unsafe fn get_typeid_map() -> &'static RwLock<HashMap<core::any::TypeId, InternalTypeId>> {
     TYPEID_INIT_ONCE.call_once(|| {
         TYPEID_MAP.0.set(Some(init_typeid_map()))
     });
@@ -63,8 +130,8 @@ unsafe fn get_typeid_map() -> &'static RwLock<TypeIdMap> {
 }
 
 impl std::ops::Deref for TypeIdMapRwLock {
-    type Target = RwLock<TypeIdMap>;
-    fn deref(&self) -> &'static RwLock<TypeIdMap> {
+    type Target = RwLock<HashMap<core::any::TypeId, InternalTypeId>>;
+    fn deref(&self) -> &'static Self::Target {
         unsafe { get_typeid_map() }
     }
 }
@@ -73,39 +140,47 @@ impl std::ops::Deref for TypeIdMapRwLock {
 /// ID's are as unique as `core::any::TypeId`, but are linear and small in integer value proportional to the number of ID's requested.
 /// This is useful in certain circumstances where having type ID's which can be represented in a small number of bytes (one or two) is desired
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InternalTypeId(usize);
-
-impl PartialOrd for InternalTypeId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        None // no-op, must be implemented to satisfy ordering elsewhere, but type-ids are considered unordered
-    }
-}
-
-impl Ord for InternalTypeId {
-    fn cmp(&self, other: &Self) -> Ordering {
-        Ordering::Equal // all type-id's are considered equal in ordering, they are unordered
-    }
-}
+pub struct InternalTypeId(u64);
 
 impl InternalTypeId {
     pub fn of<T>() -> Self where T: 'static {
         type_id::<T>()
     }
 
-    pub fn total_assigned() -> usize {
+    #[allow(dead_code)]
+    #[deprecated]
+    fn _total_assigned() -> usize {
         unsafe {
             let len = TYPEID_MAP.read().expect("Attempt to reference uninitialized typeid map").len();
             loop {
                 let count = TYPEID_COUNTER.load(core::sync::atomic::Ordering::SeqCst);
                 
-                if count == len {
-                    return count;
+                if count == len as u64 {
+                    return count as usize;
                 }
             }
         }
     }
+}
 
-    pub fn raw(&self) -> usize {
+impl PartialOrd for InternalTypeId {
+    fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
+        None // no-op, must be implemented to satisfy ordering elsewhere, e.g. in query sorting, but type-ids are considered unordered
+    }
+}
+
+impl Ord for InternalTypeId {
+    fn cmp(&self, _: &Self) -> Ordering {
+        Ordering::Equal // all type-id's are considered equal in ordering, they are unordered
+    }
+}
+
+impl LinearId for InternalTypeId {
+    fn unique() -> InternalTypeId {
+        InternalTypeId::of::<()>()
+    }
+
+    fn as_linear_raw(&self) -> u64 {
         self.0
     }
 }
@@ -118,13 +193,13 @@ fn type_id<T>() -> InternalTypeId where T: 'static {
             if let Some(type_id) = guard.get(&tid) {
                 return *type_id
             } else {
-                iid = InternalTypeId(TYPEID_COUNTER.fetch_add(1usize, core::sync::atomic::Ordering::SeqCst));
+                iid = InternalTypeId(TYPEID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::SeqCst));
                 if let Some(v) = guard.insert(tid, iid) {
                     panic!("TypeId already mapped {:?}", v);
                 }
                 
                 assert!(!guard.is_empty());
-                assert_eq!(guard.len() - 1, iid.raw());
+                assert_eq!(guard.len() - 1, iid.as_linear_raw() as usize);
 
             }
         } else {
@@ -144,19 +219,47 @@ mod test {
         struct B(usize);
         struct C<T>(T);
 
-        assert_eq!(0, InternalTypeId::total_assigned());
-        
-        assert_eq!(0, InternalTypeId::of::<A>().raw());
-        assert_eq!(1, InternalTypeId::of::<B>().raw());
-        assert_eq!(0, InternalTypeId::of::<A>().raw());
-        assert_eq!(1, InternalTypeId::of::<B>().raw());
-        assert_eq!(2, InternalTypeId::of::<u32>().raw());
-        assert_eq!(3, InternalTypeId::of::<f32>().raw());
-        assert_eq!(4, InternalTypeId::of::<C<A>>().raw());
-        assert_eq!(5, InternalTypeId::of::<C<B>>().raw());
-        assert_eq!(6, InternalTypeId::of::<C<C<A>>>().raw());
-        assert_eq!(7, InternalTypeId::of::<C<C<(A,B)>>>().raw());
-        
-        assert_eq!(8, InternalTypeId::total_assigned());
+        let tida = InternalTypeId::of::<A>();
+        let tidb = InternalTypeId::of::<B>();
+        let tidc = InternalTypeId::of::<C<u32>>();
+        let tidd = InternalTypeId::of::<C<f64>>();
+        let tide = InternalTypeId::of::<C<A>>();
+        let tidf = InternalTypeId::of::<C<B>>();
+        let tidg = InternalTypeId::of::<C<C<A>>>();
+        let tidh = InternalTypeId::of::<C<C<B>>>();
+
+        // do it many times, even though 
+        let iteration_count: usize = 100;
+        let mut iterations = 0;
+        while iterations < iteration_count {
+            let tid0 = InternalTypeId::of::<A>();
+            let tid1 = InternalTypeId::of::<B>();
+            let tid2 = InternalTypeId::of::<C<u32>>();
+            let tid3 = InternalTypeId::of::<C<f64>>();
+            let tid4 = InternalTypeId::of::<C<A>>();
+            let tid5 = InternalTypeId::of::<C<B>>();
+            let tid6 = InternalTypeId::of::<C<C<A>>>();
+            let tid7 = InternalTypeId::of::<C<C<B>>>();
+
+            assert!(tid0 != tid1 && tid1 != tid2 && tid2 != tid3 && tid3 != tid4 && tid4 != tid5 && tid5 != tid6 && tid6 != tid7 && tid7 != tid0);
+            assert!(tid0 == tida && tid1 == tidb && tid2 == tidc && tid3 == tidd && tid4 == tide && tid5 == tidf && tid6 == tidg && tid7 == tidh);
+            
+            assert_eq!(tida, InternalTypeId::of::<A>());
+            assert_eq!(tidb, InternalTypeId::of::<B>());
+            assert_eq!(tidc, InternalTypeId::of::<C<u32>>());
+            assert_eq!(tidd, InternalTypeId::of::<C<f64>>());
+            assert_eq!(tide, InternalTypeId::of::<C<A>>());
+            assert_eq!(tidf, InternalTypeId::of::<C<B>>());
+            assert_eq!(tidg, InternalTypeId::of::<C<C<A>>>());
+            assert_eq!(tidh, InternalTypeId::of::<C<C<B>>>());
+
+            assert_ne!(tida, InternalTypeId::of::<B>());
+            assert_ne!(tidb, InternalTypeId::of::<A>());
+
+            assert_ne!(tidg, InternalTypeId::of::<C<C<B>>>());
+            assert_ne!(tidh, InternalTypeId::of::<C<C<A>>>());
+   
+            iterations += 1;
+        }
     }
 }

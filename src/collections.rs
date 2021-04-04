@@ -1,5 +1,24 @@
+use std::array::IntoIter;
+
+/// Collection access
+
+pub(crate) trait Get<I> {
+    type Item;
+    fn get(&self, idx: I) -> Option<&Self::Item>;
+}
+
+pub(crate) trait GetMut<I> {
+    type Item;
+    fn get_mut(&mut self, idx: I) -> Option<&mut Self::Item>;
+}
+
+
+
+
+
 /// Collections
 
+#[derive(Debug, Clone)]
 pub struct SparseSet<T> {
     sparse: Vec<usize>,
     dense: Vec<usize>,
@@ -15,7 +34,7 @@ impl<T> SparseSet<T> {
         }
     }
 
-    pub fn get(&self, key: usize) -> Option<&T> {
+    fn private_get(&self, key: usize) -> Option<&T> {
         if let Some(idx) = self.get_idx(key) {
             Some(&self.data[idx])
         } else {
@@ -23,7 +42,7 @@ impl<T> SparseSet<T> {
         }
     }
 
-    pub fn get_mut(&mut self, key: usize) -> Option<&mut T> {
+    fn private_get_mut(&mut self, key: usize) -> Option<&mut T> {
         if let Some(idx) = self.get_idx(key) {
             Some(&mut self.data[idx])
         } else {
@@ -34,9 +53,9 @@ impl<T> SparseSet<T> {
     pub fn contains(&self, key: usize) -> bool {
         self.get_idx(key).is_some()
     }
-
+    
     pub fn insert(&mut self, key: usize, item: T) -> Option<T> {
-        while key > self.capacity() {
+        while key >= self.capacity() {
             self.reserve( core::cmp::max(1usize,self.len() * 2usize));
         }
 
@@ -98,7 +117,7 @@ impl<T> SparseSet<T> {
     }
 
     fn get_idx(&self, key: usize) -> Option<usize> {
-        if key > self.capacity() {
+        if key >= self.capacity() {
             return None
         } else {
             let idx = self.sparse[key];
@@ -108,4 +127,62 @@ impl<T> SparseSet<T> {
         }
         return None
     }
+
+    pub fn iter(&self) -> <&Self as IntoIterator>::IntoIter {
+        self.into_iter()
+    }
+
+    pub fn iter_mut(&mut self) -> <&mut Self as IntoIterator>::IntoIter {
+        self.into_iter()
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.data.as_slice()
+    }
+    
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self.data.as_mut_slice()
+    }
 }
+
+impl<T> IntoIterator for SparseSet<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.data.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SparseSet<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        (&self.data).into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut SparseSet<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        (&mut self.data).into_iter()
+    }
+}
+
+impl<T> Get<usize> for SparseSet<T> {
+    type Item = T;
+    fn get(&self, idx: usize) -> Option<&Self::Item> {
+        self.private_get(idx)
+    }
+}
+
+impl<T> GetMut<usize> for SparseSet<T> {
+    type Item = T;
+    fn get_mut(&mut self, idx: usize) -> Option<&mut Self::Item> {
+        self.private_get_mut(idx)
+    }
+}
+
