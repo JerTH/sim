@@ -204,7 +204,7 @@ mod test_world {
         fn component_query_system(local_world: LocalWorld) -> SystemResult {
             type Component = f32;
 
-            for _ in 0..10000 {
+            for _ in 0..1000 {
                 let query = Query::new()
                     .read::<f32>()
                     .read::<i32>()
@@ -212,15 +212,34 @@ mod test_world {
                     .make(&local_world);
 
                 let result = query.execute();
-
-                let iter = <dyn IntoQueryIter<(Component,)>>::iter(&result);
-                let v: Vec<(crate::query::Ref<Component>,)> = iter.collect();
-                let l = v.len();
+                
+                for component in IntoQueryIter::<(f32, i32)>::iter(&result) {
+                    println!("got component: {:?}", component)
+                }
             }
 
             local_world.queue_command(WorldCommand::Stop);
             Ok(())
         }
+
+        // April 4th 2020
+        // 
+        // ECS is sort of working. Key things to do now are:
+        //  - Clean up the code. Query is especially a mess. May require some better/new abstractions
+        //  - Refine the Query -> QueryIter transformation
+        //  - Implement the various IntoQueryIter overloads
+        //  - Implement Mut/Ref query returns. Right now it only returns Ref
+        //  - Transition from single threaded/RefCell impl to multi-threaded impl
+        //  
+        // Future things to potentially implement:
+        //  - Implement WorldSystem diagnostics, dependency graph, auto-parallel, etc
+        //  - Add robust MPSC logging
+        //  - Implement events for systems through LocalWorld interface. May add another guard on LocalWorld that notifies of events when its taken
+        //  - Make dropping LocalWorld after a system finishes running perform some cleanup/diagnostics/event handling
+        //  - Investigate SIMD bit comparisons for filtering dead/alive entities or components from control bytes
+        //  - Double buffer some or all component state, and intercept reads and writes through Mut to reference the correct state copy
+        // 
+
         
         world.add_system(&entity_producer_system);
         world.add_system(&component_query_system);
@@ -348,6 +367,10 @@ impl ComponentSet {
 
     pub fn contains<T>(&self) -> bool where T: 'static {
         self.ident == ComponentSetId::of::<T>()
+    }
+
+    pub(crate) fn component_set_id(&self) -> ComponentSetId {
+        self.ident
     }
     
     pub(crate) fn raw_set<T: 'static>(&self) -> Option<&SparseSet<T>> {

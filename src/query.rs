@@ -1,7 +1,4 @@
-use std::{
-    fmt::Debug,
-    ops::Deref
-};
+use std::{any::{Any, TypeId}, fmt::Debug, ops::Deref};
 
 use crate::{
     identity::{EntityId, LocalExecutionId}, 
@@ -232,52 +229,76 @@ pub struct QueryResult<'a> {
     component_sets: Vec<&'a ComponentSet>,
 }
 
-impl<'a, A: core::any::Any> IntoQueryIter<'a, (A,)> for QueryResult<'a> {
+//macro_rules! impl_query_destructure {
+//    ( $head:ident, $( $tail:ident, )* ) => {
+//        impl<$head, $( $tail ),*> IntoQueryIter for ($head, $( $tail ),*)
+//        {
+//            // interesting delegation here, as needed
+//        }
+//
+//        impl_query_destructure!($( $tail, )*);
+//    };
+//
+//    () => {};
+//}
+
+//impl_query_destructure!(A,);
+
+impl<'a, A: Any> IntoQueryIter<'a, (A,)> for QueryResult<'a> {
     fn iter(&self) -> QueryIter<'a, (A,)> {
-        for set in self.component_sets.iter() {
-            let mut ordered_set = Vec::new();
-            if set.contains::<A>() {
-                
-                ordered_set.push(*set);
-                
-                return QueryIter::<(A,)> {
-                    ordered_set: ordered_set,
-                    index: 0,
-                    phantom: core::marker::PhantomData,
-                }
+        let mut ordered_set = Vec::new();
+        for i in 0..self.component_sets.len() {
+            match self.component_sets[i].component_set_id() {
+                id if id == ComponentSetId::of::<A>() => {
+                    ordered_set.push(self.component_sets[i]);
+                },
+                _ => { continue; }
+            }       
+        }
+
+        return QueryIter::<(A,)> {
+            ordered_set: ordered_set,
+            index: 0,
+            phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+// Lots of things to untangle:
+//  - grab the sparsesets from the world in such a way that locks them when mutated
+//  - robustly get and maintain knowledge of the hierarchy of minimum sets in the world
+//  - implement query caching
+//  - analyze the read/write pattern of each system and parallel run them where possible
+//  - make adding component types to the world ridiculously simple, preferrably without having to "register" them at all
+
+impl<'a, A: Any, B: Any> IntoQueryIter<'a, (A, B)> for QueryResult<'a> {
+    fn iter(&self) -> QueryIter<'a, (A, B)> {
+        let mut ordered_set = Vec::new();
+        for i in 0..self.component_sets.len() {
+            match self.component_sets[i].component_set_id() {
+                id if id == ComponentSetId::of::<A>() => {
+                    ordered_set.push(self.component_sets[i]);
+                },
+                id if id == ComponentSetId::of::<B>() => {
+                    ordered_set.push(self.component_sets[i]);
+                },
+                _ => { continue; }
             }
         }
 
-        QueryIter {
-            ordered_set: Vec::new(),
+        return QueryIter::<(A, B)> {
+            ordered_set: ordered_set,
             index: 0,
-            phantom: std::marker::PhantomData,
+            phantom: core::marker::PhantomData,
         }
-        
-        // lots of things to untangle:
-        // - the typeid of the components and of their storage and of their storage wrapped in Mut or Ref are all different
-        // - grab the sparsesets from the world in such a way that locks them when mutated
-        // - sort the filter set in Query::make()
-        // - robustly get and maintain knowledge of the hierarchy of minimum sets in the world
-        // - implement query caching
-        // - analyze the read/write pattern of each system and parallel run them where possible
-        // - make adding component types to the world ridiculously simple, preferrably without having to "register" them at all
-        // - double buffer component state, and intercept reads and writes through Mut to reference the correct state copy
-        // - investigate SIMD bit comparisons for filtering dead/alive entities or components from control bytes
     }
 }
 
-impl<'a, A: core::any::Any, B: core::any::Any> IntoQueryIter<'a, (A, B)> for QueryResult<'a> {
-    fn iter(&self) -> QueryIter<'a, (A, B)> {
-        unimplemented!()
-    }
-}
-
-impl<'a, A: core::any::Any, B: core::any::Any, C: core::any::Any> IntoQueryIter<'a, (A, B, C)> for QueryResult<'a> {
-    fn iter(&self) -> QueryIter<'a, (A, B, C)> {
-        unimplemented!()
-    }
-}
+//impl<'a, A: core::any::Any, B: core::any::Any, C: core::any::Any> IntoQueryIter<'a, (A, B, C)> for QueryResult<'a> {
+//    fn iter(&self) -> QueryIter<'a, (A, B, C)> {
+//        unimplemented!()
+//    }
+//}
 
 
 
@@ -289,12 +310,13 @@ pub struct QueryIter<'a, T> {
     phantom: core::marker::PhantomData<T>
 }
 
-impl<'a, A: Debug + 'static> Iterator for QueryIter<'a, (A,)> {
+impl<'a, A> Iterator for QueryIter<'a, (A,)>
+where
+    A: Debug + 'static
+{
     type Item = (Ref<'a, A>, );
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Here Be Dragons
-        
         self.index += 1;
         if let Some(minimum_set) = self.ordered_set.first() {
             if let Some(raw_set) = minimum_set.raw_set::<A>() {
@@ -312,27 +334,20 @@ impl<'a, A: Debug + 'static> Iterator for QueryIter<'a, (A,)> {
     }
 }
 
-pub trait IntoQueryIter<'a, T: core::any::Any> {
+impl<'a, A, B> Iterator for QueryIter<'a, (A, B)>
+where 
+    A: Debug + 'static, 
+    B: Debug + 'static,
+{
+    type Item = (Ref<'a, A>, Ref<'a, B>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unimplemented!()
+    }
+}
+
+pub trait IntoQueryIter<'a, T: Any> {
     fn iter(&self) -> QueryIter<'a, T>;
-}
-
-pub struct Mut<'a, T> {
-    target: &'a mut T,
-    world: &'a mut LocalWorld<'a>,
-}
-
-impl<'a, T> Mut<'a, T> {
-    pub fn set(&mut self, new_data: T) {
-        self.world.mark_component_change();
-        *self.target = new_data;
-    }
-}
-
-impl<'a, T> Deref for Mut<'a, T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        self.target
-    }
 }
 
 #[derive(Debug)]
@@ -358,3 +373,10 @@ mod test_query {
         //println!("{:#?}", query);
     }
 }
+
+
+// Notes
+//
+//  - Queries have two flavors (for now), EntityWise and ComponentWise
+//    > EntityWise collect a set of EntityId's and then filter on components
+//    > ComponentWise collect a set of component types and then filter on component matches
