@@ -14,6 +14,8 @@ pub mod cli;
 pub mod constants;
 pub mod identity;
 pub mod collections;
+
+#[macro_use]
 pub mod debug;
 
 #[macro_use]

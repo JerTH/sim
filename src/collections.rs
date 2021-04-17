@@ -1,6 +1,7 @@
-use std::array::IntoIter;
+/// Collections
 
-/// Collection access
+use std::fmt::Debug;
+use crate::{debug::MemoryUse, identity::EntityId};
 
 pub(crate) trait Get<I> {
     type Item;
@@ -12,11 +13,11 @@ pub(crate) trait GetMut<I> {
     fn get_mut(&mut self, idx: I) -> Option<&mut Self::Item>;
 }
 
+pub trait EntityIndexible {
+    fn index_to_id(&self, idx: usize) -> Option<EntityId>;
+}
 
 
-
-
-/// Collections
 
 #[derive(Debug, Clone)]
 pub struct SparseSet<T> {
@@ -25,7 +26,7 @@ pub struct SparseSet<T> {
     data: Vec<T>,
 }
 
-impl<T> SparseSet<T> {
+impl<T: Debug> SparseSet<T> {
     pub fn new() -> SparseSet<T> {
         SparseSet {
             sparse: Vec::new(),
@@ -54,36 +55,38 @@ impl<T> SparseSet<T> {
         self.get_idx(key).is_some()
     }
     
+    // When an item is inserted with a key:
+    // dense.last() == key
+    // data.last() == item
+    // sparse[key] == data.last()
     pub fn insert(&mut self, key: usize, item: T) -> Option<T> {
         while key >= self.capacity() {
-            self.reserve( core::cmp::max(1usize,self.len() * 2usize));
+            self.reserve( core::cmp::max(1usize,self.len()));
         }
 
         if let Some(stored) = self.get_mut(key) {
             return Some(std::mem::replace(stored, item))
         } else {
-            let n = self.len();
+            self.sparse[key] = self.len();
             self.dense.push(key);
             self.data.push(item);
-            self.sparse[key] = n;
-
             return None
         }
     }
     
     pub fn remove(&mut self, key: usize) -> Option<T> {
         if let Some(idx) = self.get_idx(key) {
-            assert_eq!(key, self.dense.swap_remove(idx));
-
-            let item = self.data.swap_remove(idx);
+            let swap = *self.dense.last().unwrap();
+            let (_, item) = (self.dense.swap_remove(idx), self.data.swap_remove(idx));
             
-            if !self.is_empty() {
-                let swapped_key = self.dense[idx];
-                self.sparse[swapped_key] = idx;
+            if self.len() > 0 {
+                self.sparse[swap] = idx;
             }
 
             self.sparse[key] = self.capacity();
+
             return Some(item)
+
         } else {
             return None
         }
@@ -121,11 +124,33 @@ impl<T> SparseSet<T> {
             return None
         } else {
             let idx = self.sparse[key];
-            if idx < self.len() && self.dense[idx] == key {
-                return Some(idx)
+
+            if self.sparse[key] < self.len() {
+                if self.dense[self.sparse[key]] == key {
+                    return Some(idx)
+                }
             } 
         }
         return None
+    }
+
+    /// Gets the key/value pair for an item at a given raw index
+    ///
+    /// Safety:
+    /// 
+    /// SparseSet is unordered. Internally, items are free to move around, thus it's not generally useful to
+    /// associate a raw index with a key/value pair. This function is declared unsafe to mitigate
+    /// possible foot-gun usage. That said, this is still useful sometimes especially when iterating the
+    /// contents of the SparseSet
+    pub unsafe fn get_kv(&self, idx: usize) -> Option<(usize, &T)> {
+        let key = self.dense.get(idx);
+        let val = self.data.get(idx);
+        
+        if let (Some(k), Some(v)) = (key, val) {
+            Some((*k, v))
+        } else {
+            None
+        }
     }
 
     pub fn iter(&self) -> <&Self as IntoIterator>::IntoIter {
@@ -142,6 +167,16 @@ impl<T> SparseSet<T> {
     
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self.data.as_mut_slice()
+    }
+}
+
+impl<T> MemoryUse for SparseSet<T> {
+    fn memory_use_estimate(&self) -> usize {
+        let mut total = std::mem::size_of_val(&self);
+        total += self.sparse.capacity() * std::mem::size_of::<usize>();
+        total += self.dense.capacity() * std::mem::size_of::<usize>();
+        total += self.data.capacity() * std::mem::size_of::<T>();
+        total
     }
 }
 
@@ -172,17 +207,51 @@ impl<'a, T> IntoIterator for &'a mut SparseSet<T> {
     }
 }
 
-impl<T> Get<usize> for SparseSet<T> {
+impl<T: Debug> Get<usize> for SparseSet<T> {
     type Item = T;
     fn get(&self, idx: usize) -> Option<&Self::Item> {
         self.private_get(idx)
     }
 }
 
-impl<T> GetMut<usize> for SparseSet<T> {
+impl<T: Debug> GetMut<usize> for SparseSet<T> {
     type Item = T;
     fn get_mut(&mut self, idx: usize) -> Option<&mut Self::Item> {
         self.private_get_mut(idx)
     }
 }
 
+impl<T: Debug> EntityIndexible for SparseSet<T> {
+    fn index_to_id(&self, idx: usize) -> Option<EntityId> {
+        unsafe { self.get_kv(idx).map(|kv| EntityId::from(kv.0)) }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sparse_set() {
+        let n = 8;
+        let mut set = SparseSet::new();
+
+        fn to_letter(i: usize) -> char { (i + 97) as u8 as char }
+
+        for i in 0..n {
+            assert_eq!(None, set.insert(i as usize, to_letter(i)));
+        }
+
+        for i in 0..n {
+            assert_eq!(&to_letter(i), set.get(i).unwrap());
+        }
+
+        for i in 0..n {
+            assert_eq!(to_letter(i), set.remove(i).unwrap());
+
+            for j in (i+1)..n {
+                assert_eq!(&to_letter(j), set.get(j).unwrap());
+            }
+        }
+    }
+}

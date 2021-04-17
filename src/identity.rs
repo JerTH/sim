@@ -74,6 +74,12 @@ impl LinearId for EntityId {
     }
 }
 
+impl From<usize> for EntityId {
+    fn from(val: usize) -> Self {
+        EntityId(val)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SystemId(usize);
 

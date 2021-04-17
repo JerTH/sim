@@ -1,6 +1,10 @@
 
 use std::{cell::{Cell, RefCell}, sync::{Mutex, MutexGuard, Once, mpsc::{ channel, Sender, Receiver }}, thread::{self, JoinHandle, ThreadId}, time::Instant};
 
+pub trait MemoryUse {
+    fn memory_use_estimate(&self) -> usize;
+}
+
 #[derive(Debug, Clone)]
 pub enum LogMessageContents {
     Log(String),
@@ -16,6 +20,17 @@ pub struct LogMessage {
     time: Instant,
     module: &'static str,
     contents: LogMessageContents,
+}
+
+impl LogMessage {
+    pub fn new(module: &'static str, contents: LogMessageContents) -> Self {
+        LogMessage {
+            time: ::std::time::Instant::now(),
+            thread: ::std::thread::current().id(),
+            module: module,
+            contents: contents,
+        }
+    }
 }
 
 struct LogRx(Cell<Option<Mutex<Receiver<LogMessage>>>>);
@@ -116,7 +131,7 @@ pub unsafe fn get_log_channel() -> Sender<LogMessage> {
         
         LOG_SINK_JOIN_HANDLE.set(Some(handle));
     }); // end of LOG_INIT_ONCE
-    
+
     // get_log_channel logic
     match *LOG_SENDER_MUTEX.0.as_ptr() {
         Some(ref log_tx) => {
@@ -166,25 +181,48 @@ pub unsafe fn cleanup_log_channel() {
 }
 
 fn sink(msg: LogMessage) {
-    // Todo: write messages to some structure, periodically dump data into the output
-    //       ensure all data is flushed in the case of Close
-    println!("LOG: {:?} (send: {:?}) (sink: {:?})", msg.contents, msg.thread, thread::current().id());
+    // Todo: - Write messages to some structure, periodically dump data into the output
+    //       - Ensure all data is flushed in the case of Close
+    //       - User selectable/created log sinks
+    //       - Runtime and compile time log level switches
+    match msg.contents {
+        LogMessageContents::Log(contents) => {
+            println!("{}", contents);
+        },
+        LogMessageContents::Debug(contents) => {
+            println!("[DEBUG] {}", contents);
+        },
+        LogMessageContents::Warn(contents) => {
+            println!("[WARNING] {}", contents);
+        },
+        LogMessageContents::Error(contents) => {
+            println!("[ERROR] {}", contents);
+        },
+        LogMessageContents::Close => {
+            println!("Closing log channel");
+        },
+    }
 }
 
 thread_local! {
-    static LOG_TX_THREAD_LOCAL: RefCell<Option<Sender<LogMessage>>> = RefCell::new(None); 
+    pub static LOG_TX_THREAD_LOCAL: RefCell<Option<Sender<LogMessage>>> = RefCell::new(None); 
+}
+
+#[allow(unused_macros)]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        LOG_TX_THREAD_LOCAL.with(|__tx| {
+            let __msg = LogMessage::new(module_path!(), LogMessageContents::Debug(format!($($arg)*)), );
+            log_send!(__tx, __msg);
+        });
+    }
 }
 
 #[allow(unused_macros)]
 macro_rules! log {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage {
-                time: Instant::now(),
-                thread: ::std::thread::current().id(),
-                module: module_path!(),
-                contents: LogMessageContents::Log(format!($($arg)*)),
-            };
+            let __msg = LogMessage::new(module_path!(), LogMessageContents::Log(format!($($arg)*)), );
             log_send!(__tx, __msg);
         });
     }
@@ -194,12 +232,7 @@ macro_rules! log {
 macro_rules! warn {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage {
-                time: Instant::now(),
-                thread: ::std::thread::current().id(),
-                module: module_path!(),
-                contents: LogMessageContents::Warn(format!($($arg)*)),
-            };
+            let __msg = LogMessage::new(module_path!(), LogMessageContents::Warn(format!($($arg)*)), );
             log_send!(__tx, __msg);
         });
     }
@@ -209,12 +242,7 @@ macro_rules! warn {
 macro_rules! error {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage {
-                time: Instant::now(),
-                thread: ::std::thread::current().id(),
-                module: module_path!(),
-                contents: LogMessageContents::Error(format!($($arg)*)),
-            };
+            let __msg = LogMessage::new(module_path!(), LogMessageContents::Error(format!($($arg)*)), );
             log_send!(__tx, __msg);
         });
     }

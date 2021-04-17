@@ -1,17 +1,8 @@
 /// World
 
-use crate::{
-    collections::{Get, GetMut, SparseSet},
-    identity::{EntityId, InternalTypeId, LinearId, LocalExecutionId, SystemId},
-    query::{Query, QueryIter, IntoQueryIter}
-};
+use crate::{collections::{EntityIndexible, Get, GetMut, SparseSet}, debug::*, identity::{EntityId, InternalTypeId, LinearId, LocalExecutionId, SystemId}, query::{Query, QueryIter, IntoQueryIter}};
 
-use std::{
-    cell::{Cell, RefCell},
-    fmt::Debug,
-    ops::Deref, 
-    usize
-};
+use std::{any::Any, cell::{Cell, RefCell}, fmt::Debug, ops::Deref, usize};
 
 // Main -> World -> LocalWorld -> WorldSystem -> QueryBuilder -> Query -> QueryResult -> QueryIter -> (Ref/Mut)
 //                                    ^                                                                   |
@@ -52,7 +43,7 @@ impl World {
         entity_id
     }
 
-    pub fn add_component<T: 'static>(&self, entity: EntityId, component: T) {
+    pub fn add_component<T: Debug + 'static>(&self, entity: EntityId, component: T) {
         let component_set_id = ComponentSetId::of::<T>();
         let mut components = self.components.borrow_mut();
         if let Some(component_set) = components.get_mut(component_set_id) {
@@ -75,7 +66,8 @@ impl World {
     pub fn run(&self) {
         loop {
             // Update each system linearly for now. In the future use a dependency graph to automatically parallelize them
-            for system_id in &self.system_ids { // instead of iterating the linear array of system id's, here we will use the dependency graph
+            for (i, system_id) in self.system_ids.iter().enumerate() { // instead of iterating the linear array of system id's, here we will use the dependency graph
+                //println!("Running system {}\n{:#?}", i, self.systems);
                 if let Some(system) = self.systems.get(system_id) {
                     let local_world = LocalWorld {
                         world: &self,
@@ -83,13 +75,14 @@ impl World {
                     };
                     
                     system.run(local_world).expect(format!("Error when running system: {:?}", system).as_str());
+                } else {
+                    error!("Failed to get system (id: {:?}) from system set", system_id);
                 }
             }
-            
 
             for command in self.command_queue.borrow_mut().drain(0..) {
                 match command {
-                    WorldCommand::Stop => { println!("WorldCommand::Stop"); return },
+                    WorldCommand::Stop => { debug!("WorldCommand::Stop"); return },
                 }
             }
         }
@@ -125,13 +118,13 @@ mod test_world {
     fn test_adding_systems() {
         let mut world = World::new();
 
-        fn hello_system(local_world: LocalWorld) -> SystemResult {
-            println!("Hello from hello_system!");
+        fn hello_system(_: LocalWorld) -> SystemResult {
+            debug!("Hello from hello_system!");
             Ok(())
         }
 
         fn goodbye_system(local_world: LocalWorld) -> SystemResult {
-            println!("Goodbye from goodbye_system!");
+            debug!("Goodbye from goodbye_system!");
             local_world.queue_command(WorldCommand::Stop);
             Ok(())
         }
@@ -180,10 +173,13 @@ mod test_world {
     
     #[test]
     fn test_query() {
+        log!("");
         let mut world = World::new();
 
         fn entity_producer_system(local_world: LocalWorld) -> SystemResult {
-            for i in 0..77 {
+            debug!("Running entity producer system");
+
+            for i in 0..10 {
                 if i % 3 == 0 {
                     let entity = local_world.new_entity();
                     let float_component = i as f32 * 33.333;
@@ -202,22 +198,22 @@ mod test_world {
         }
         
         fn component_query_system(local_world: LocalWorld) -> SystemResult {
-            type Component = f32;
+            debug!("Running component query system");
 
-            for _ in 0..1000 {
+            for _ in 0..1 {
                 let query = Query::new()
-                    .read::<f32>()
-                    .read::<i32>()
-                    .read::<bool>()
+                    .with::<f32>()
+                    .with::<i32>()
+                    .with::<bool>()
                     .make(&local_world);
 
-                let result = query.execute();
-                
-                for component in IntoQueryIter::<(f32, i32)>::iter(&result) {
-                    println!("got component: {:?}", component)
+                //let result = query.execute();
+
+                for (f, b) in IntoQueryIter::<(i32, bool)>::into_iter(query) {
+                    debug!("Got components: {:?}", (*f, *b));
                 }
             }
-
+            
             local_world.queue_command(WorldCommand::Stop);
             Ok(())
         }
@@ -332,16 +328,24 @@ impl LinearId for ComponentSetId {
     }
 }
 
+
+
 #[derive(Debug)]
 pub struct ComponentSet {
     ident: ComponentSetId,
     count: usize,
     name: String,
-    set: Box<dyn core::any::Any>,
+    set: Box<dyn Any>,
+}
+
+impl EntityIndexible for ComponentSet {
+    fn index_to_id(&self, idx: usize) -> Option<EntityId> {
+        EntityIndexible::index_to_id(&self.set.downcast_ref::<EntityIndexible>(), idx) // might need to make a "header" object around sparseset
+    }
 }
 
 impl ComponentSet {
-    fn new<T>() -> Self where T: 'static {
+    fn new<T: Debug>() -> Self where T: 'static {
         ComponentSet {
             ident: ComponentSetId::of::<T>(),
             count: 0,
@@ -349,8 +353,8 @@ impl ComponentSet {
             set: Box::new(SparseSet::<T>::new()),
         }
     }
-
-    fn add_component<T: 'static>(&mut self, entity: EntityId, component: T) {
+    
+    fn add_component<T: Debug + 'static>(&mut self, entity: EntityId, component: T) {
         if self.set.is::<SparseSet<T>>() {
             if let Some(set) = self.set.downcast_mut::<SparseSet<T>>() {
                 let result = set.insert(entity.as_linear_raw() as usize, component);
@@ -363,6 +367,10 @@ impl ComponentSet {
         } else {
             panic!("ComponentSet::set is not SparseSet<T>");
         }
+    }
+
+    pub fn index_to_id(&self, idx: usize) -> Option<EntityId> {
+
     }
 
     pub fn contains<T>(&self) -> bool where T: 'static {
@@ -408,7 +416,7 @@ impl<'a> LocalWorld<'a> {
         self.world.new_entity()
     }
 
-    pub fn add_component<T: 'static>(&self, entity: EntityId, component: T) {
+    pub fn add_component<T: Debug + 'static>(&self, entity: EntityId, component: T) {
         self.world.add_component::<T>(entity, component)
     }
 
@@ -486,31 +494,29 @@ mod test {
         struct C<T>(T);
 
         let builder = Query::new() // short circuits if the query was previously constructed and executed
-            .read::<A>()
-            .read::<C<usize>>()
-            .write::<B>()
+            .with::<A>()
+            .with::<C<usize>>()
+            .with::<B>()
             .not::<C<A>>()
             .not::<C<B>>()
-            .read::<C<C<B>>>()
+            .with::<C<C<B>>>()
             .closer_than(10.0, &position)
             .further_than(1.0, &position)
             .sort_filters();
 
         let world = LocalWorld{ world: &dummy_world(), execution_id: Cell::new(LocalExecutionId::unique()) };
         
-        let query = builder.make(&world);
-
-        let _result = query.execute();
+        let _query = builder.make(&world);
     }
 }
 
 
-pub trait Spatial {
-    fn position(&self) -> (f64, f64, f64);
+pub trait IntoCoordinate {
+    fn as_coordinate(&self) -> (f64, f64, f64);
 }
 
-impl Spatial for (f64, f64, f64) {
-    fn position(&self) -> (f64, f64, f64) {
+impl IntoCoordinate for (f64, f64, f64) {
+    fn as_coordinate(&self) -> (f64, f64, f64) {
         *self
     }
 }
