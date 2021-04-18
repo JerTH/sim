@@ -1,12 +1,35 @@
 /// World
 
-use crate::{collections::{EntityIndexible, Get, GetMut, SparseSet}, debug::*, identity::{EntityId, InternalTypeId, LinearId, LocalExecutionId, SystemId}, query::{Query, QueryIter, IntoQueryIter}};
+use crate::{
+    debug::*,
+    collections::{UnsafeAnyExt, Get, GetMut, SparseSet},
+    identity::{EntityId, InternalTypeId, LinearId, LocalExecutionId, SystemId},
+    query::{IntoQueryIter, Query}
+};
 
-use std::{any::Any, cell::{Cell, RefCell}, fmt::Debug, ops::Deref, usize};
+use std::{
+    any::Any,
+    cell::{Cell, RefCell},
+    fmt::Debug,
+    usize
+};
 
-// Main -> World -> LocalWorld -> WorldSystem -> QueryBuilder -> Query -> QueryResult -> QueryIter -> (Ref/Mut)
-//                                    ^                                                                   |
-//                                    + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+//
+//
+//
+// TODO (April 18th)
+//
+// - Ref<T> functionality
+// - Multithreading of systems
+// - Systems dependency graph
+// - Fallback Mutex guards for safety when depgraph invalid
+// - System events
+// - Spatial structure
+// - Refactor and cleanup `World`
+// - Cached query
+//
+//
+//
 
 #[derive(Debug, Clone)]
 pub enum WorldCommand {
@@ -21,7 +44,6 @@ pub struct World {
     systems: SparseSet<WorldSystem>,
     system_ids: Vec<SystemId>,
     command_queue: RefCell<Vec<WorldCommand>>,
-    // entity list
     // dependency graph
     // spatial data
 }
@@ -64,6 +86,9 @@ impl World {
     }
     
     pub fn run(&self) {
+
+        // when running systems in parallel, maybe wrap each system in a go/finished block that chains condvars based on data dependency? 
+
         loop {
             // Update each system linearly for now. In the future use a dependency graph to automatically parallelize them
             for (i, system_id) in self.system_ids.iter().enumerate() { // instead of iterating the linear array of system id's, here we will use the dependency graph
@@ -111,11 +136,11 @@ impl World {
 }
 
 #[cfg(test)]
-mod test_world {
+mod tests {
     use super::*;
 
     #[test]
-    fn test_adding_systems() {
+    fn add_systems() {
         let mut world = World::new();
 
         fn hello_system(_: LocalWorld) -> SystemResult {
@@ -135,7 +160,7 @@ mod test_world {
     }
 
     #[test]
-    fn test_create_entities() {
+    fn create_entities() {
         let mut world = World::new();
 
         fn entity_producer(local_world: LocalWorld) -> SystemResult {
@@ -145,7 +170,7 @@ mod test_world {
     }
 
     #[test]
-    fn test_add_components() {
+    fn add_components() {
         let mut world = World::new();
 
         fn entity_producer_system(local_world: LocalWorld) -> SystemResult {
@@ -172,7 +197,7 @@ mod test_world {
     }
     
     #[test]
-    fn test_query() {
+    fn query() {
         log!("");
         let mut world = World::new();
 
@@ -207,9 +232,7 @@ mod test_world {
                     .with::<bool>()
                     .make(&local_world);
 
-                //let result = query.execute();
-
-                for (f, b) in IntoQueryIter::<(i32, bool)>::into_iter(query) {
+                for (f, b) in IntoQueryIter::<(i32, bool)>::into_iter(&query) {
                     debug!("Got components: {:?}", (*f, *b));
                 }
             }
@@ -240,6 +263,33 @@ mod test_world {
         world.add_system(&entity_producer_system);
         world.add_system(&component_query_system);
         world.run();
+    }
+
+    fn dummy_world<'a>() -> World {
+        World::new()
+    }
+
+    #[test]
+    fn filters() {
+        let position = (1.0, 2.0, 3.0);
+        struct A;
+        struct B;
+        struct C<T>(T);
+
+        let builder = Query::new() // short circuits if the query was previously constructed and executed
+            .with::<A>()
+            .with::<C<usize>>()
+            .with::<B>()
+            .not::<C<A>>()
+            .not::<C<B>>()
+            .with::<C<C<B>>>()
+            .closer_than(10.0, &position)
+            .further_than(1.0, &position)
+            .sort_filters();
+
+        let world = LocalWorld{ world: &dummy_world(), execution_id: Cell::new(LocalExecutionId::unique()) };
+        
+        let _query = builder.make(&world);
     }
 }
 
@@ -338,12 +388,6 @@ pub struct ComponentSet {
     set: Box<dyn Any>,
 }
 
-impl EntityIndexible for ComponentSet {
-    fn index_to_id(&self, idx: usize) -> Option<EntityId> {
-        EntityIndexible::index_to_id(&self.set.downcast_ref::<EntityIndexible>(), idx) // might need to make a "header" object around sparseset
-    }
-}
-
 impl ComponentSet {
     fn new<T: Debug>() -> Self where T: 'static {
         ComponentSet {
@@ -370,7 +414,7 @@ impl ComponentSet {
     }
 
     pub fn index_to_id(&self, idx: usize) -> Option<EntityId> {
-
+        unimplemented!()
     }
 
     pub fn contains<T>(&self) -> bool where T: 'static {
@@ -387,6 +431,10 @@ impl ComponentSet {
 
     pub(crate) fn raw_set_mut<T: 'static>(&mut self) -> Option<&mut SparseSet<T>> {
         self.set.downcast_mut::<SparseSet<T>>()
+    }
+
+    pub(crate) unsafe fn raw_set_unchecked<T: 'static>(&self) -> &SparseSet<T> {
+        self.set.downcast_ref_unchecked::<SparseSet<T>>()
     }
 }
 
@@ -467,48 +515,6 @@ impl<'a> LocalWorld<'a> {
 }
 
 
-
-
-
-
-
-// fn system_api(world: &LocalWorld) {
-//     // query components
-//     // catch and emit events
-// }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::query::*;
-
-    fn dummy_world<'a>() -> World {
-        World::new()
-    }
-
-    #[test]
-    fn test_queryfilter_sort() {
-        let position = (1.0, 2.0, 3.0);
-        struct A;
-        struct B;
-        struct C<T>(T);
-
-        let builder = Query::new() // short circuits if the query was previously constructed and executed
-            .with::<A>()
-            .with::<C<usize>>()
-            .with::<B>()
-            .not::<C<A>>()
-            .not::<C<B>>()
-            .with::<C<C<B>>>()
-            .closer_than(10.0, &position)
-            .further_than(1.0, &position)
-            .sort_filters();
-
-        let world = LocalWorld{ world: &dummy_world(), execution_id: Cell::new(LocalExecutionId::unique()) };
-        
-        let _query = builder.make(&world);
-    }
-}
 
 
 pub trait IntoCoordinate {

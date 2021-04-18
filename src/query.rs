@@ -1,15 +1,10 @@
-use std::{any::{Any, TypeId}, cell::UnsafeCell, fmt::Debug, ops::{Deref, DerefMut}};
+use std::{cell::UnsafeCell, fmt::Debug, ops::{Deref, DerefMut}};
 
 use crate::{
-    identity::{EntityId, LocalExecutionId}, 
     world::{ComponentSet, ComponentSetId, LocalWorld, IntoCoordinate},
-    collections::{Get, GetMut},
+    collections::{Get},
     debug::*,
 };
-
-
-
-
 
 #[derive(Debug, Copy, Clone)]
 pub enum QueryFilter {
@@ -20,7 +15,6 @@ pub enum QueryFilter {
     ComponentNot(ComponentSetId), // rejects all entities with the given component
     SpatialCloserThan(f64, (f64, f64, f64)), // rejects all entities which can be considered further than the given linear distance from the given 3D point
     SpatialFurtherThan(f64, (f64, f64, f64)), // rejects all entities which can be considered closer than the given linear distance from the given 3D point
-    // SpatialFrustum, // rejects all entities which lay outside of the given frustum
 }
 
 impl QueryFilter {
@@ -57,12 +51,6 @@ impl Ord for QueryFilter {
         Ord::cmp(&self.precedence(), &other.precedence())
     }
 }
-
-
-
-
-
-
 
 pub struct QueryBuilder<'a> {
     filter_set: Vec<QueryFilter>,
@@ -152,12 +140,6 @@ impl<'a> QueryBuilder<'a> {
     }
 }
 
-
-
-
-
-
-
 #[derive(Debug)]
 pub struct Query<'a> {
     world: &'a LocalWorld<'a>,
@@ -188,25 +170,6 @@ impl<'a> Query<'a> {
         }
     }
 
-    pub fn _execute(self) -> QueryResult<'a> {
-        // - filter on spatial constraints and collect the list of entities
-        // - test for the minimum constraint set, including the constrained spatial set
-        // - begin iterating over the minimum set, test each constraint in minimum set order
-        // - yield components of entities which satisfy all constraints
-
-        let mut component_sets = Vec::new();
-        for set_id in self.components {
-            if let Some(set) = self.world.component_set_from_id(set_id) {
-                component_sets.push(set)
-            }
-        }
-
-        QueryResult {
-            world: self.world,
-            component_sets: component_sets,
-        }
-    }
-
     fn get_component_sets(&self) -> Vec<&'a ComponentSet> {
         let mut component_sets = Vec::new();
         for set_id in &self.components {
@@ -218,90 +181,11 @@ impl<'a> Query<'a> {
     }
 }
 
-
-
-
-
 #[derive(Debug)]
 pub struct QueryResult<'a> {
     world: &'a LocalWorld<'a>,
     component_sets: Vec<&'a ComponentSet>,
 }
-
-//macro_rules! impl_query_destructure {
-//    ( $head:ident, $( $tail:ident, )* ) => {
-//        impl<$head, $( $tail ),*> IntoQueryIter for ($head, $( $tail ),*)
-//        {
-//            // interesting delegation here, as needed
-//        }
-//
-//        impl_query_destructure!($( $tail, )*);
-//    };
-//
-//    () => {};
-//}
-
-//impl_query_destructure!(A,);
-
-//impl<'a, A: Any> IntoQueryIter<'a, (A,)> for Query<'a> {
-//    fn into_iter(self) -> QueryIter<'a, (A,)> {
-//        let world = self.world;
-//        let component_sets = self.get_component_sets();
-//        let mut ordered_set = Vec::new();
-//
-//        for i in 0..component_sets.len() {
-//            match component_sets[i].component_set_id() {
-//                id if id == ComponentSetId::of::<A>() => {
-//                    ordered_set.push(component_sets[i]);
-//                },
-//                _ => { continue; }
-//            }       
-//        }
-//
-//        return QueryIter::<(A,)> {
-//            world: world,
-//            required_components: ordered_set,
-//            iteration_index: 0,
-//            phantom: core::marker::PhantomData,
-//        }
-//    }
-//}
-
-// Lots of things to untangle:
-//  - grab the sparsesets from the world in such a way that locks them when mutated
-//  - robustly get and maintain knowledge of the hierarchy of minimum sets in the world
-//  - implement query caching
-//  - analyze the read/write pattern of each system and parallel run them where possible
-//  - make adding component types to the world ridiculously simple, preferrably without having to "register" them at all
-
-//impl<'a, A: Any, B: Any> IntoQueryIter<'a, (A, B)> for Query<'a> {
-//    fn into_iter(self) -> QueryIter<'a, (A, B)> {
-//        let world = self.world;
-//        let component_sets = self.get_component_sets();
-//        let mut ordered_set = Vec::new();
-//
-//        for i in 0..component_sets.len() {
-//            match component_sets[i].component_set_id() {
-//                id if id == ComponentSetId::of::<A>() => {
-//                    ordered_set.push(component_sets[i]);
-//                },
-//                id if id == ComponentSetId::of::<B>() => {
-//                    ordered_set.push(component_sets[i]);
-//                },
-//                _ => { continue; }
-//            }
-//        }
-//
-//        return QueryIter::<(A, B)> {
-//            world: world,
-//            ordered_components: ordered_set,
-//            min_set_index: 0usize,
-//            iteration_index: 0,
-//            _phantom: core::marker::PhantomData,
-//        }
-//    }
-//}
-
 
 pub struct QueryIter<'a, T> {
     world: &'a LocalWorld<'a>,
@@ -312,6 +196,9 @@ pub struct QueryIter<'a, T> {
     _phantom: core::marker::PhantomData<T>
 }
 
+pub trait IntoQueryIter<'a, T: Debug + 'static> {
+    fn into_iter(&self) -> QueryIter<'a, T>;
+}
 
 #[allow(unused_macros)]
 macro_rules! impl_into_query_iter {
@@ -332,19 +219,17 @@ macro_rules! impl_into_query_iter {
                 };
                 
                 let required_components = self.get_component_sets();
-                for set in required_components {
-                    match set.component_set_id() {
-                        $(
-                            id if id == ComponentSetId::of::<$comp>() => {
-                                iter.ordered_components.push(set);
-                            },
-                        )*
-                        _ => { continue; }
+                $(
+                    for set in &required_components {
+                        if set.component_set_id() == ComponentSetId::of::<$comp>() {
+                            iter.ordered_components.push(set);
+                        }
                     }
-                }
+                )*
 
-                if let ($(Some($comp)),*) = ($(iter.ordered_components.get($index).and_then(  |__set| __set.raw_set::<$comp>() )),*) {
-                    iter.min_set_index = *[$($comp.len()),*].iter().min().expect("slice is not empty");
+                let components = ($(iter.ordered_components.get($index).and_then(  |__set| __set.raw_set::<$comp>() )),*);
+                if let ($(Some($comp)),*) = components {
+                    iter.min_set_index = [$($comp.len()),*].iter().enumerate().min_by_key(|(_, &v)| v).expect("slice is not empty").0;
                     match iter.min_set_index {
                         $(
                             $index => {
@@ -354,7 +239,7 @@ macro_rules! impl_into_query_iter {
                         _ => { unreachable!() }
                     }
                 } else {
-                    panic!("unable to populate QueryIter with all required components");
+                    fatal!("Unable to populate QueryIter with all required components: {:?}", components);
                 }
                 
                 return iter;
@@ -366,20 +251,49 @@ macro_rules! impl_into_query_iter {
 impl_into_query_iter!([A, 0]);
 impl_into_query_iter!([A, 0]; [B, 1]);
 impl_into_query_iter!([A, 0]; [B, 1]; [C, 2]);
+impl_into_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]);
+impl_into_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]);
+impl_into_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]; [F, 5]);
 
 #[allow(unused_macros)]
 macro_rules! impl_query_iter {
     ($([$comp:ident, $index:expr]);*) => {
         #[allow(unused_parens)]
         #[allow(non_snake_case)]
+        #[allow(unreachable_patterns)]
         impl<'a, $($comp),*> Iterator for QueryIter<'a, ($($comp),*,)>
         where $($comp: Debug + 'static),*
         {
             type Item = ($(Ref<'a, $comp>),*);
             fn next(&mut self) -> Option<Self::Item> {
                 while self.iteration_index < self.maximum_iterations {
-                    // implement typeless raw index to entity ID over ComponentSet, thus we can convert the min set indices into IDs to access components in tuple order
-                    return None
+                    let entity_id: usize = match self.min_set_index {
+                        $(
+                            $index => {
+                                unsafe {
+                                    if let Some(entity_id) = self.ordered_components[$index].raw_set_unchecked::<$comp>().get_key(self.iteration_index) {
+                                        self.iteration_index += 1;
+                                        entity_id
+                                    } else {
+                                        return None
+                                    }
+                                }
+                            },
+                        )*
+                        _ => unreachable!()
+                    };
+                    
+                    $(
+                        let $comp: Ref<$comp> = unsafe {
+                            if let Some(component) = self.ordered_components[$index].raw_set_unchecked::<$comp>().get(entity_id) {
+                                Ref::new(component, self.world)
+                            } else {
+                                return None
+                            }
+                        };
+                    )*
+
+                    return Some(($($comp),*));
                 }
                 return None
             }
@@ -388,82 +302,11 @@ macro_rules! impl_query_iter {
 }
 
 impl_query_iter!([A, 0]);
-//impl_query_iter!([A, 0]; [B, 1]);
+impl_query_iter!([A, 0]; [B, 1]);
 impl_query_iter!([A, 0]; [B, 1]; [C, 2]);
-
-
-impl<'a, A, B> Iterator for QueryIter<'a, (A, B)>
-where 
-    A: Debug + 'static, 
-    B: Debug + 'static,
-{
-    type Item = (Ref<'a, A>, Ref<'a, B>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        const IDX_A: usize = 0;
-        const IDX_B: usize = 1;
-
-        // first, get a reference to each of the component sets we're looking for
-        let set_a = self.ordered_components.get(IDX_A).and_then(|set| set.raw_set::<A>());
-        let set_b = self.ordered_components.get(IDX_B).and_then(|set| set.raw_set::<B>());
-
-        // if we have all of the sets
-        if let (Some(set_a), Some(set_b)) = (set_a, set_b) {
-
-            // get the minimum set as an index of (A, B, C) etc. We need this to properly order the access
-            //
-            // better idea, 
-            let min_set_idx = if set_a.len() > set_b.len() { IDX_B } else { IDX_A };
-
-            match min_set_idx {
-                IDX_A => {
-                    
-                    while self.iteration_index < set_a.len() {
-                        let (entity, ca) = unsafe { set_a.get_kv(self.iteration_index).unwrap() };
-                        
-                        if let Some(cb) = set_b.get(entity) {
-                            self.iteration_index += 1;
-                            return Some((
-                                Ref::new(ca, self.world),
-                                Ref::new(cb, self.world),
-                            ))
-                        } else {
-                            self.iteration_index += 1;
-                            continue;
-                        }
-                    }      
-                    return None;              
-                },
-                //IDX_B => {
-                //    debug!("\t\tmatch IDX_B");
-//
-                //    let (entity, cb) = unsafe { set_b.get_kv(self.index).unwrap() };
-                //    if let Some(ca) = set_a.get(entity) {
-                //        Some((
-                //            Ref::new(ca, self.world),
-                //            Ref::new(cb, self.world),
-                //        ))
-                //    } else {
-                //        None
-                //    }
-                //},
-                _ => {
-                    unreachable!();
-                }
-            };
-
-            //self.index += 1;
-            //return result;
-
-        } else {
-            None
-        }
-    }
-}
-
-pub trait IntoQueryIter<'a, T: Debug + 'static> {
-    fn into_iter(&self) -> QueryIter<'a, T>;
-}
+impl_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]);
+impl_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]);
+impl_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]; [F, 5]);
 
 /// A reference to a single component
 /// 

@@ -11,6 +11,7 @@ pub enum LogMessageContents {
     Warn(String),
     Error(String),
     Debug(String),
+    Fatal(String),
     Close,
 }
 
@@ -198,6 +199,9 @@ fn sink(msg: LogMessage) {
         LogMessageContents::Error(contents) => {
             println!("[ERROR] {}", contents);
         },
+        LogMessageContents::Fatal(contents) => {
+            println!("[FATAL] {}", contents);
+        },
         LogMessageContents::Close => {
             println!("Closing log channel");
         },
@@ -244,6 +248,19 @@ macro_rules! error {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
             let __msg = LogMessage::new(module_path!(), LogMessageContents::Error(format!($($arg)*)), );
             log_send!(__tx, __msg);
+        });
+    }
+}
+
+#[allow(unused_macros)]
+macro_rules! fatal {
+    ($($arg:tt)*) => {
+        LOG_TX_THREAD_LOCAL.with(|__tx| {
+            let __msg = LogMessage::new(module_path!(), LogMessageContents::Fatal(format!($($arg)*)), );
+            log_send!(__tx, __msg);
+
+            ::std::thread::sleep(::std::time::Duration::from_millis(100)); // hack to allow pending log messages to cleanly post
+            panic!()
         });
     }
 }

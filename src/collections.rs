@@ -1,6 +1,9 @@
 /// Collections
 
-use std::fmt::Debug;
+extern crate unsafe_any;
+
+pub use unsafe_any::UnsafeAnyExt;
+use std::{any::Any, fmt::Debug};
 use crate::{debug::MemoryUse, identity::EntityId};
 
 pub(crate) trait Get<I> {
@@ -16,8 +19,6 @@ pub(crate) trait GetMut<I> {
 pub trait EntityIndexible {
     fn index_to_id(&self, idx: usize) -> Option<EntityId>;
 }
-
-
 
 #[derive(Debug, Clone)]
 pub struct SparseSet<T> {
@@ -134,6 +135,10 @@ impl<T: Debug> SparseSet<T> {
         return None
     }
 
+    pub fn get_key(&self, idx: usize) -> Option<usize> {
+        self.dense.get(idx).map(|key| *key)
+    }
+    
     /// Gets the key/value pair for an item at a given raw index
     ///
     /// Safety:
@@ -218,12 +223,6 @@ impl<T: Debug> GetMut<usize> for SparseSet<T> {
     type Item = T;
     fn get_mut(&mut self, idx: usize) -> Option<&mut Self::Item> {
         self.private_get_mut(idx)
-    }
-}
-
-impl<T: Debug> EntityIndexible for SparseSet<T> {
-    fn index_to_id(&self, idx: usize) -> Option<EntityId> {
-        unsafe { self.get_kv(idx).map(|kv| EntityId::from(kv.0)) }
     }
 }
 
