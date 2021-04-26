@@ -1,5 +1,3 @@
-use crate::{ math::*, sim::* };
-
 pub const SOL_GRAV_PARAM: f64 = 132712440018000000000.0;
 pub const SOL_MASS: f64 = 1989000000000000000000000000000.0; // kg
 pub const SOL_RADIUS: f32 = 696340000.0; // m

@@ -1,11 +1,5 @@
 #![feature(type_name_of_val)]
 
-/// Development tool for testing purposes only, shouldn't be in functional binary, add a compile_error!() to this later
-macro_rules! soft_unimplemented {
-    () => {
-        println!("WARNING: UNFINISHED IMPLEMENTATION LINE {} IN {}", std::line!(), String::from(std::file!()).to_ascii_uppercase());
-    };
-}
 
 pub mod math;
 pub mod sim;
@@ -14,6 +8,7 @@ pub mod cli;
 pub mod constants;
 pub mod identity;
 pub mod collections;
+pub mod flowgraph;
 
 #[macro_use]
 pub mod debug;

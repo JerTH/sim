@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 use std::ops::{ AddAssign, SubAssign };
 use crate::sim::*;
 

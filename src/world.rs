@@ -1,18 +1,8 @@
 /// World
 
-use crate::{
-    debug::*,
-    collections::{UnsafeAnyExt, Get, GetMut, SparseSet},
-    identity::{EntityId, InternalTypeId, LinearId, LocalExecutionId, SystemId},
-    query::{IntoQueryIter, Query}
-};
+use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, debug::*, flowgraph::FlowGraphNode, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId, SystemId}, query::{Query}};
 
-use std::{
-    any::Any,
-    cell::{Cell, RefCell},
-    fmt::Debug,
-    usize
-};
+use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, fmt::Debug, usize};
 
 //
 //
@@ -31,9 +21,14 @@ use std::{
 //
 //
 
+
+pub trait Component: Debug + Any + 'static {} 
+impl<T> Component for T where T: Debug + Any + 'static {}
+
 #[derive(Debug, Clone)]
 pub enum WorldCommand {
     Stop,
+    ResolveFlowGraph,
 }
 
 /// World
@@ -44,7 +39,7 @@ pub struct World {
     systems: SparseSet<WorldSystem>,
     system_ids: Vec<SystemId>,
     command_queue: RefCell<Vec<WorldCommand>>,
-    // dependency graph
+    // flow graph
     // spatial data
 }
 
@@ -79,7 +74,7 @@ impl World {
             //    set: Box::new(SparseSet::<T>::new()),
             //};
 
-            components.insert(component_set_id.as_linear_raw() as usize, component_set);
+            components.insert_with(component_set_id.as_linear_raw() as usize, component_set);
             drop(components); // explicitely drop the RefMut
             self.add_component(entity, component); // recursively add component to the new set
         }
@@ -88,15 +83,15 @@ impl World {
     pub fn run(&self) {
 
         // when running systems in parallel, maybe wrap each system in a go/finished block that chains condvars based on data dependency? 
-
+        
         loop {
             // Update each system linearly for now. In the future use a dependency graph to automatically parallelize them
-            for (i, system_id) in self.system_ids.iter().enumerate() { // instead of iterating the linear array of system id's, here we will use the dependency graph
+            for system_id in self.system_ids.iter() { // instead of iterating the linear array of system id's, here we will use the dependency graph
                 //println!("Running system {}\n{:#?}", i, self.systems);
                 if let Some(system) = self.systems.get(system_id) {
                     let local_world = LocalWorld {
                         world: &self,
-                        execution_id: Cell::new(LocalExecutionId::unique()),
+                        execution_id: Cell::new(system.execution_id()),
                     };
                     
                     system.run(local_world).expect(format!("Error when running system: {:?}", system).as_str());
@@ -108,6 +103,18 @@ impl World {
             for command in self.command_queue.borrow_mut().drain(0..) {
                 match command {
                     WorldCommand::Stop => { debug!("WorldCommand::Stop"); return },
+                    WorldCommand::ResolveFlowGraph => {
+                        // Collect all read-only systems
+
+                        let read_only: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| system.writes.borrow().is_empty()).collect();
+                        let writes: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| !system.writes.borrow().is_empty()).collect();
+
+                        // for each system
+                        //   for each dep of that system
+                        //     for each other system
+                        //       for each dep of the other system
+                        //       
+                    }
                 }
             }
         }
@@ -116,10 +123,11 @@ impl World {
     pub fn add_system(&mut self, system: &'static dyn Fn(LocalWorld) -> SystemResult) {
         let system_id = SystemId::unique();
         self.system_ids.push(system_id);
-        self.systems.insert(system_id.as_linear_raw() as usize, WorldSystem {
+        self.systems.insert_with(system_id.as_linear_raw() as usize, WorldSystem {
             func: Box::new(system),
-            reads: None,
-            writes: None,
+            reads: RefCell::new(Vec::new()),
+            writes: RefCell::new(Vec::new()),
+            exec_id: SystemExecutionId::unique(),
             name: String::from("UNKNOWN"),
         });
     }
@@ -135,176 +143,44 @@ impl World {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn add_systems() {
-        let mut world = World::new();
-
-        fn hello_system(_: LocalWorld) -> SystemResult {
-            debug!("Hello from hello_system!");
-            Ok(())
-        }
-
-        fn goodbye_system(local_world: LocalWorld) -> SystemResult {
-            debug!("Goodbye from goodbye_system!");
-            local_world.queue_command(WorldCommand::Stop);
-            Ok(())
-        }
-
-        world.add_system(&hello_system);
-        world.add_system(&goodbye_system);
-        world.run();
-    }
-
-    #[test]
-    fn create_entities() {
-        let mut world = World::new();
-
-        fn entity_producer(local_world: LocalWorld) -> SystemResult {
-            let entity = local_world.new_entity();
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn add_components() {
-        let mut world = World::new();
-
-        fn entity_producer_system(local_world: LocalWorld) -> SystemResult {
-            for _ in 0..10 {
-                let entity = local_world.new_entity();
-                let component = 0usize;
-                local_world.add_component(entity, component);
-            }
-            Ok(())
-        }
-
-        fn float_producer_system(local_world: LocalWorld) -> SystemResult {
-            for entity in local_world.entities() {
-                let component = 0f32;
-                local_world.add_component(entity, component);
-            }
-            local_world.queue_command(WorldCommand::Stop);
-            Ok(())
-        }
-
-        world.add_system(&entity_producer_system);
-        world.add_system(&float_producer_system);
-        world.run();
-    }
-    
-    #[test]
-    fn query() {
-        log!("");
-        let mut world = World::new();
-
-        fn entity_producer_system(local_world: LocalWorld) -> SystemResult {
-            debug!("Running entity producer system");
-
-            for i in 0..10 {
-                if i % 3 == 0 {
-                    let entity = local_world.new_entity();
-                    let float_component = i as f32 * 33.333;
-                    let bool_component = i % 7 == 0;
-                    local_world.add_component(entity, float_component);
-                    local_world.add_component(entity, bool_component);
-                } else {
-                    let entity = local_world.new_entity();
-                    let int_component = i * 10;
-                    let bool_component = i % 13 == 0;
-                    local_world.add_component(entity, int_component);
-                    local_world.add_component(entity, bool_component);
-                }
-            }
-            Ok(())
-        }
-        
-        fn component_query_system(local_world: LocalWorld) -> SystemResult {
-            debug!("Running component query system");
-
-            for _ in 0..1 {
-                let query = Query::new()
-                    .with::<f32>()
-                    .with::<i32>()
-                    .with::<bool>()
-                    .make(&local_world);
-
-                for (f, b) in IntoQueryIter::<(i32, bool)>::into_iter(&query) {
-                    debug!("Got components: {:?}", (*f, *b));
-                }
-            }
-            
-            local_world.queue_command(WorldCommand::Stop);
-            Ok(())
-        }
-
-        // April 4th 2020
-        // 
-        // ECS is sort of working. Key things to do now are:
-        //  - Clean up the code. Query is especially a mess. May require some better/new abstractions
-        //  - Refine the Query -> QueryIter transformation
-        //  - Implement the various IntoQueryIter overloads
-        //  - Implement Mut/Ref query returns. Right now it only returns Ref
-        //  - Transition from single threaded/RefCell impl to multi-threaded impl
-        //  
-        // Future things to potentially implement:
-        //  - Implement WorldSystem diagnostics, dependency graph, auto-parallel, etc
-        //  - Add robust MPSC logging
-        //  - Implement events for systems through LocalWorld interface. May add another guard on LocalWorld that notifies of events when its taken
-        //  - Make dropping LocalWorld after a system finishes running perform some cleanup/diagnostics/event handling
-        //  - Investigate SIMD bit comparisons for filtering dead/alive entities or components from control bytes
-        //  - Double buffer some or all component state, and intercept reads and writes through Mut to reference the correct state copy
-        // 
-
-        
-        world.add_system(&entity_producer_system);
-        world.add_system(&component_query_system);
-        world.run();
-    }
-
-    fn dummy_world<'a>() -> World {
-        World::new()
-    }
-
-    #[test]
-    fn filters() {
-        let position = (1.0, 2.0, 3.0);
-        struct A;
-        struct B;
-        struct C<T>(T);
-
-        let builder = Query::new() // short circuits if the query was previously constructed and executed
-            .with::<A>()
-            .with::<C<usize>>()
-            .with::<B>()
-            .not::<C<A>>()
-            .not::<C<B>>()
-            .with::<C<C<B>>>()
-            .closer_than(10.0, &position)
-            .further_than(1.0, &position)
-            .sort_filters();
-
-        let world = LocalWorld{ world: &dummy_world(), execution_id: Cell::new(LocalExecutionId::unique()) };
-        
-        let _query = builder.make(&world);
-    }
-}
 
 type SystemResult = Result<(), ()>;
 
 struct WorldSystem {
+    exec_id: SystemExecutionId,
     func: Box<dyn Fn(LocalWorld) -> SystemResult>,
-    reads: Option<Vec<ComponentSetId>>,
-    writes: Option<Vec<ComponentSetId>>,
+    reads: RefCell<Vec<ComponentSetId>>,
+    writes: RefCell<Vec<ComponentSetId>>,
     name: String,
 }
 
 impl WorldSystem {
     fn run(&self, local_world: LocalWorld) -> SystemResult {
         (self.func)(local_world)
+    }
+
+    fn execution_id(&self) -> SystemExecutionId {
+        self.exec_id
+    }
+
+    pub(crate) fn mark_write_dependency<T>(&self) where T: Component {
+        self.writes.borrow_mut().push(ComponentSetId::of::<T>())
+    }
+
+    pub(crate) fn mark_read_dependency<T>(&self) where T: Component {
+        self.reads.borrow_mut().push(ComponentSetId::of::<T>())
+    }
+}
+
+impl FlowGraphNode for WorldSystem {
+    type Dependency = ComponentSetId;
+
+    fn write_deps(&self) -> Vec<Self::Dependency> {
+        self.writes.borrow().iter().cloned().collect()
+    }
+
+    fn read_deps(&self) -> Vec<Self::Dependency> {
+        self.reads.borrow().iter().cloned().collect()
     }
 }
 
@@ -350,15 +226,6 @@ impl GetMut<ComponentSetId> for SparseSet<ComponentSet> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ComponentTypeId(InternalTypeId);
-
-impl ComponentTypeId {
-    pub(crate) fn of<T>() -> Self where T: 'static {
-        Self(InternalTypeId::of::<T>())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComponentSetId(InternalTypeId);
 
@@ -378,7 +245,7 @@ impl LinearId for ComponentSetId {
     }
 }
 
-
+type RawComponentSet<T> = SparseSet<UnsafeCell<T>>;
 
 #[derive(Debug)]
 pub struct ComponentSet {
@@ -394,14 +261,14 @@ impl ComponentSet {
             ident: ComponentSetId::of::<T>(),
             count: 0,
             name: String::from(core::any::type_name::<T>()),
-            set: Box::new(SparseSet::<T>::new()),
+            set: Box::new(RawComponentSet::<T>::new()),
         }
     }
     
-    fn add_component<T: Debug + 'static>(&mut self, entity: EntityId, component: T) {
-        if self.set.is::<SparseSet<T>>() {
-            if let Some(set) = self.set.downcast_mut::<SparseSet<T>>() {
-                let result = set.insert(entity.as_linear_raw() as usize, component);
+    fn add_component<T: Component>(&mut self, entity: EntityId, component: T) {
+        if self.set.is::<RawComponentSet<T>>() {
+            if let Some(set) = self.set.downcast_mut::<RawComponentSet<T>>() {
+                let result = set.insert_with(entity.as_linear_raw() as usize, UnsafeCell::new(component));
                 
                 assert!(result.is_none());
                 self.count += 1;
@@ -413,10 +280,6 @@ impl ComponentSet {
         }
     }
 
-    pub fn index_to_id(&self, idx: usize) -> Option<EntityId> {
-        unimplemented!()
-    }
-
     pub fn contains<T>(&self) -> bool where T: 'static {
         self.ident == ComponentSetId::of::<T>()
     }
@@ -425,16 +288,12 @@ impl ComponentSet {
         self.ident
     }
     
-    pub(crate) fn raw_set<T: 'static>(&self) -> Option<&SparseSet<T>> {
-        self.set.downcast_ref::<SparseSet<T>>()
+    pub(crate) fn raw_set<T: 'static>(&self) -> Option<&RawComponentSet<T>> {
+        self.set.downcast_ref::<RawComponentSet<T>>()
     }
 
-    pub(crate) fn raw_set_mut<T: 'static>(&mut self) -> Option<&mut SparseSet<T>> {
-        self.set.downcast_mut::<SparseSet<T>>()
-    }
-
-    pub(crate) unsafe fn raw_set_unchecked<T: 'static>(&self) -> &SparseSet<T> {
-        self.set.downcast_ref_unchecked::<SparseSet<T>>()
+    pub(crate) unsafe fn raw_set_unchecked<T: 'static>(&self) -> &RawComponentSet<T> {
+        self.set.downcast_ref_unchecked::<RawComponentSet<T>>()
     }
 }
 
@@ -456,7 +315,7 @@ impl<'a> Iterator for EntityIdIter<'a> {
 #[derive(Debug)]
 pub struct LocalWorld<'a> {
     world: &'a World, 
-    execution_id: Cell<LocalExecutionId>,
+    execution_id: Cell<SystemExecutionId>,
 }
 
 impl<'a> LocalWorld<'a> {
@@ -484,24 +343,32 @@ impl<'a> LocalWorld<'a> {
         unsafe { (*set).get(id) } // TODO: This is not good, clean this up when adding concurrency
     }
 
-    pub(crate) fn local_execution_id(&self) -> LocalExecutionId {
+    pub(crate) fn system_execution_id(&self) -> SystemExecutionId {
         self.execution_id.get()
     }
 
-    pub(crate) fn cached_query_set(&self) -> std::collections::HashMap<LocalExecutionId, Query> {
-        unimplemented!()
-    }
-    
-    pub(crate) fn mark_component_change(&mut self) {
+    pub(crate) fn cached_query_set(&self) -> std::collections::HashMap<SystemExecutionId, Query> {
         unimplemented!()
     }
 
-    pub(crate) fn mark_read_dependency(&mut self, set_id: ComponentSetId) {
-        unimplemented!()
+    pub(crate) fn mark_read_dependency<T: Component>(&self) {
+        if let Some(system) = self.world.systems.as_slice().iter().find(|system| {
+            system.execution_id() == self.system_execution_id()
+        }) {
+            system.mark_read_dependency::<T>();
+        } else {
+            fatal!("unable to find system data while attempting to mark read dependency");
+        }
     }
 
-    pub(crate) fn mark_write_dependency(&mut self, set_id: ComponentSetId) {
-        unimplemented!()
+    pub(crate) fn mark_write_dependency<T: Component>(&self) {
+        if let Some(system) = self.world.systems.as_slice().iter().find(|system| {
+            system.execution_id() == self.system_execution_id()
+        }) {
+            system.mark_write_dependency::<T>();
+        } else {
+            fatal!("unable to find system data while attempting to mark write dependency");
+        }
     }
 
     #[allow(dead_code)]
@@ -509,7 +376,7 @@ impl<'a> LocalWorld<'a> {
     pub(crate) fn test_dummy(world: &'a World) -> Self {
         LocalWorld {
             world: world,
-            execution_id: Cell::new(LocalExecutionId::unique()),
+            execution_id: Cell::new(SystemExecutionId::unique()),
         }
     }
 }
@@ -528,6 +395,7 @@ impl IntoCoordinate for (f64, f64, f64) {
 }
 
 
+
 // Debug implementations
 
 impl core::fmt::Debug for WorldSystem {
@@ -538,5 +406,166 @@ impl core::fmt::Debug for WorldSystem {
         .field("writes", &self.writes)
         .field("name", &self.name)
         .finish()
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::IntoQueryIter;
+
+    #[test]
+    fn hello_world() {
+        let mut world = World::new();
+
+        fn hello_system(_: LocalWorld) -> SystemResult {
+            debug!("Hello from hello_system!");
+            Ok(())
+        }
+
+        fn goodbye_system(local_world: LocalWorld) -> SystemResult {
+            debug!("Goodbye from goodbye_system!");
+            local_world.queue_command(WorldCommand::Stop);
+            Ok(())
+        }
+
+        world.add_system(&hello_system);
+        world.add_system(&goodbye_system);
+        world.run();
+    }
+
+    #[test]
+    fn add_components() {
+        let mut world = World::new();
+
+        fn entity_producer_system(local_world: LocalWorld) -> SystemResult {
+            for _ in 0..10 {
+                let entity = local_world.new_entity();
+                let component = 0usize;
+                local_world.add_component(entity, component);
+            }
+            Ok(())
+        }
+
+        fn float_producer_system(local_world: LocalWorld) -> SystemResult {
+            for entity in local_world.entities() {
+                let component = 0f32;
+                local_world.add_component(entity, component);
+            }
+            local_world.queue_command(WorldCommand::Stop);
+            Ok(())
+        }
+
+        world.add_system(&entity_producer_system);
+        world.add_system(&float_producer_system);
+        world.run();
+    }
+    
+    #[test]
+    fn queries() {
+        log!("");
+        let mut world = World::new();
+
+        fn entity_producer_system(local_world: LocalWorld) -> SystemResult {
+            debug!("Running entity producer system");
+
+            for i in 0..10 {
+                if i % 3 == 0 {
+                    let entity = local_world.new_entity();
+                    let float_component = i as f32 * 33.333;
+                    let bool_component = i % 7 == 0;
+                    local_world.add_component(entity, float_component);
+                    local_world.add_component(entity, bool_component);
+                } else {
+                    let entity = local_world.new_entity();
+                    let int_component = i * 10;
+                    let bool_component = i % 13 == 0;
+                    local_world.add_component(entity, int_component);
+                    local_world.add_component(entity, bool_component);
+                }
+            }
+            Ok(())
+        }
+        
+        fn component_query_system(local_world: LocalWorld) -> SystemResult {
+            debug!("Running component query system");
+
+            for _ in 0..1 {
+                let query = Query::new()
+                    .with::<f32>()
+                    .with::<i32>()
+                    .with::<bool>()
+                    .make(&local_world);
+
+                for (f, mut b) in IntoQueryIter::<(i32, bool)>::into_iter(&query) {
+                    debug!("Got components: {:?}", (*f, *b));
+                    *b = !*b;
+                }
+            }
+            
+            local_world.queue_command(WorldCommand::Stop);
+            Ok(())
+        }
+
+        // April 4th 2020
+        // 
+        // ECS is sort of working. Key things to do now are:
+        //  - Clean up the code. Query is especially a mess. May require some better/new abstractions
+        //  - Refine the Query -> QueryIter transformation
+        //  - Implement the various IntoQueryIter overloads
+        //  - Implement Mut/Ref query returns. Right now it only returns Ref
+        //  - Transition from single threaded/RefCell impl to multi-threaded impl
+        //  
+        // Future things to potentially implement:
+        //  - Implement WorldSystem diagnostics, dependency graph, auto-parallel, etc
+        //  - Add robust MPSC logging
+        //  - Implement events for systems through LocalWorld interface. May add another guard on LocalWorld that notifies of events when its taken
+        //  - Make dropping LocalWorld after a system finishes running perform some cleanup/diagnostics/event handling
+        //  - Investigate SIMD bit comparisons for filtering dead/alive entities or components from control bytes
+        //  - Double buffer some or all component state, and intercept reads and writes through Mut to reference the correct state copy
+        // 
+
+        
+        world.add_system(&entity_producer_system);
+        world.add_system(&component_query_system);
+        world.run();
+
+        log!("-------------------------------------------------------");
+        log!("                   world data dump                     ");
+        log!("-------------------------------------------------------");
+        log!("{:#?}", world);
+        log!("-------------------------------------------------------");
+        log!("                 end world data dump                   ");
+        log!("-------------------------------------------------------");
+
+    }
+
+    fn dummy_world<'a>() -> World {
+        World::new()
+    }
+
+    #[test]
+    fn filters() {
+        let position = (1.0, 2.0, 3.0);
+        #[derive(Debug)] struct A;
+        #[derive(Debug)] struct B;
+        #[derive(Debug)] struct C<T>(T);
+
+        let builder = Query::new() // short circuits if the query was previously constructed and executed
+            .with::<A>()
+            .with::<C<usize>>()
+            .with::<B>()
+            .not::<C<A>>()
+            .not::<C<B>>()
+            .with::<C<C<B>>>()
+            .closer_than(10.0, &position)
+            .further_than(1.0, &position)
+            .sort_filters();
+
+        let world = LocalWorld{ world: &dummy_world(), execution_id: Cell::new(SystemExecutionId::unique()) };
+        
+        let _query = builder.make(&world);
     }
 }

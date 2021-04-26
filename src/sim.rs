@@ -1,3 +1,8 @@
+// temporary to suppress compiler warnings
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+
 use std::{collections::HashMap, hash::Hash, iter::Zip, slice::{Iter, IterMut}};
 use crate::{ math::*, output::*, constants::* };
 
@@ -290,7 +295,7 @@ impl<'a> UpdateData<'a> for TranslationSystem {
     type Writes = (&'a mut PhysKinematic, &'a mut PhysDynamic);
 
     fn update(reads: Self::Reads, data: Self::Writes) {
-        
+        unimplemented!()
     }
 }
 
@@ -634,9 +639,6 @@ impl Simulation {
                     TerminationCondition::ElapsedTime(t) => {
                         return self.present().simtime < *t
                     },
-                    _ => {
-                        return true
-                    }
                 }
             }
             unreachable!()

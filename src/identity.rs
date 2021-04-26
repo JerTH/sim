@@ -48,11 +48,11 @@ pub(crate) trait LinearId {
 /// An opaque identifier used to keep track of the context of execution. This is used to uniquely identify systems,
 /// and conduct appropriate caching and filtering for query's. Modifying the contents is considered an error under all circumstances
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct LocalExecutionId(usize);
+pub struct SystemExecutionId(usize);
 
-impl LinearId for LocalExecutionId {
+impl LinearId for SystemExecutionId {
     fn unique() -> Self {
-        LocalExecutionId(unsafe { LOCALEXECUTIONID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) as usize })
+        SystemExecutionId(unsafe { LOCALEXECUTIONID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) as usize })
     }
 
     fn as_linear_raw(&self) -> u64 {

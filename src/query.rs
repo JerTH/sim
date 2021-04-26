@@ -1,10 +1,6 @@
 use std::{cell::UnsafeCell, fmt::Debug, ops::{Deref, DerefMut}};
 
-use crate::{
-    world::{ComponentSet, ComponentSetId, LocalWorld, IntoCoordinate},
-    collections::{Get},
-    debug::*,
-};
+use crate::{collections::{Get}, debug::*, world::{Component, ComponentSet, ComponentSetId, IntoCoordinate, LocalWorld}};
 
 #[derive(Debug, Copy, Clone)]
 pub enum QueryFilter {
@@ -59,7 +55,7 @@ pub struct QueryBuilder<'a> {
 }
 
 impl<'a> QueryBuilder<'a> {
-    pub fn with<T>(mut self) -> Self where T: 'static {
+    pub fn with<T>(mut self) -> Self where T: Component {
         if self.cached.is_some() { return self };
 
         let id = ComponentSetId::of::<T>();
@@ -68,19 +64,19 @@ impl<'a> QueryBuilder<'a> {
         self
     }
     
-    pub fn not<T>(mut self) -> Self where T: 'static {
+    pub fn not<T>(mut self) -> Self where T: Component {
         if self.cached.is_some() { return self };
         self.filter_set.push(QueryFilter::ComponentNot(ComponentSetId::of::<T>()));
         self
     }
 
-    pub fn changed<T>(mut self) -> Self where T: 'static {
+    pub fn changed<T>(mut self) -> Self where T: Component {
         if self.cached.is_some() { return self };
         self.filter_set.push(QueryFilter::ComponentChanged(ComponentSetId::of::<T>()));
         self
     }
 
-    pub fn any_changed<T>(mut self) -> Self where T: 'static {
+    pub fn any_changed<T>(mut self) -> Self where T: Component {
         if self.cached.is_some() { return self };
         self.filter_set.push(QueryFilter::ComponentAnyChanged(ComponentSetId::of::<T>()));
         self
@@ -157,7 +153,7 @@ impl<'a> Query<'a> {
     }
     
     pub fn cached(local_world: &'a LocalWorld) -> QueryBuilder<'a> {
-        if local_world.cached_query_set().contains_key(&local_world.local_execution_id()) {
+        if local_world.cached_query_set().contains_key(&local_world.system_execution_id()) {
             // we've cached this query, fetch and return it
             unimplemented!()
         } else {
@@ -181,12 +177,6 @@ impl<'a> Query<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct QueryResult<'a> {
-    world: &'a LocalWorld<'a>,
-    component_sets: Vec<&'a ComponentSet>,
-}
-
 pub struct QueryIter<'a, T> {
     world: &'a LocalWorld<'a>,
     ordered_components: Vec<&'a ComponentSet>,
@@ -196,7 +186,7 @@ pub struct QueryIter<'a, T> {
     _phantom: core::marker::PhantomData<T>
 }
 
-pub trait IntoQueryIter<'a, T: Debug + 'static> {
+pub trait IntoQueryIter<'a, T> {
     fn into_iter(&self) -> QueryIter<'a, T>;
 }
 
@@ -206,7 +196,7 @@ macro_rules! impl_into_query_iter {
         #[allow(unused_parens)]
         #[allow(non_snake_case)]
         impl<'a, $($comp),*> IntoQueryIter<'a, ($($comp),*,)> for Query<'a>
-        where $($comp: Debug + 'static),*
+        where $($comp: Component),*
         {
             fn into_iter(&self) -> QueryIter<'a, ($($comp),*,)> {
                 let mut iter = QueryIter {
@@ -223,6 +213,7 @@ macro_rules! impl_into_query_iter {
                     for set in &required_components {
                         if set.component_set_id() == ComponentSetId::of::<$comp>() {
                             iter.ordered_components.push(set);
+                            self.world.mark_read_dependency::<$comp>();
                         }
                     }
                 )*
@@ -241,7 +232,7 @@ macro_rules! impl_into_query_iter {
                 } else {
                     fatal!("Unable to populate QueryIter with all required components: {:?}", components);
                 }
-                
+
                 return iter;
             }
         }
@@ -262,7 +253,7 @@ macro_rules! impl_query_iter {
         #[allow(non_snake_case)]
         #[allow(unreachable_patterns)]
         impl<'a, $($comp),*> Iterator for QueryIter<'a, ($($comp),*,)>
-        where $($comp: Debug + 'static),*
+        where $($comp: Component),*
         {
             type Item = ($(Ref<'a, $comp>),*);
             fn next(&mut self) -> Option<Self::Item> {
@@ -282,11 +273,21 @@ macro_rules! impl_query_iter {
                         )*
                         _ => unreachable!()
                     };
-                    
+
                     $(
                         let $comp: Ref<$comp> = unsafe {
                             if let Some(component) = self.ordered_components[$index].raw_set_unchecked::<$comp>().get(entity_id) {
-                                Ref::new(component, self.world)
+
+
+
+
+
+                                Ref::new(component, Some(self.world)) // !!!!!!!!! Need some better mechanism for quickly setting a write dep and checking it
+                            
+                            
+                            
+                            
+                            
                             } else {
                                 return None
                             }
@@ -314,37 +315,50 @@ impl_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]; [F, 5]);
 ///
 /// All component queries are treated as immutable by default, however, as soon as
 /// a `Ref` is mutably dereferenced, all access to the component type referenced by
-/// the `Ref` for the encapsulating system are from then on are flagged as mutable
+/// the `Ref` for the encapsulating system are from then on flagged as mutable
 /// 
 /// The first time this flag is raised, a re-evaluation of the systems dependency
 /// graph is triggered. When the dependency graph is reconstructed, it's possible
 /// that some running systems data may be invalidated and must be calculated again
 #[derive(Debug)]
 pub struct Ref<'a, T> {
-    target: UnsafeCell<&'a T>,
-    world: &'a LocalWorld<'a>,
+    target: &'a UnsafeCell<T>,
+    world: Option<&'a LocalWorld<'a>>, // Some if the reference is used as immutable, None if the system is known to mutate this component
 }
 
 impl<'a, T> Ref<'a, T> {
-    fn new(item: &'a T, world: &'a LocalWorld) -> Self {
+    fn new(item: &'a UnsafeCell<T>, world: Option<&'a LocalWorld>) -> Self {
         Ref {
-            target: UnsafeCell::new(item),
+            target: item,
             world: world,
         }
     }
 }
 
-impl<'a, T> Deref for Ref<'a, T> {
+impl<'a, T> Deref for Ref<'a, T> where T: Component {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        unsafe { *self.target.get() }
+        // Read dependencies are implicit based on the inclusion of a component in a query, thus we don't need to check here
+        unsafe {
+            // Safety: Our pointer is into SparseSet<UnsafeCell<T>>::data, these are owned values and the data is guaranteed to be non-null
+            &*(self.target.get())
+        }
     }
 }
 
-impl<'a, T> DerefMut for Ref<'a, T> {
+impl<'a, T> DerefMut for Ref<'a, T> where T: Component  {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unimplemented!()
-
+        // Write dependencies are more complicated, they are lazy and must be marked the very first time a given system
+        // uses a component mutably. This only happens once for the life of the system.
+        if let Some(world) = self.world {
+            debug!("marking write dependency for {:?} in system {:?}", std::any::type_name::<T>(), world.system_execution_id());
+            world.mark_write_dependency::<T>();
+        }
+        
+        unsafe {
+            &mut *(self.target.get())
+        }
         // If this is the first time mutably dereferencing from this system, flag the system
         // as mutably borrowing the specified component and rebuild the dependency graph.
         // Otherwise, we've already flagged this and we can just return the mutable reference
@@ -357,27 +371,16 @@ impl<'a, T> DerefMut for Ref<'a, T> {
 }
 
 #[cfg(test)]
-mod test_query {
-    use super::*;
-
-    #[test]
-    fn test_query_iter() {
-        let dummy_world = crate::world::World::test_dummy();
-        let local_world = LocalWorld::test_dummy(&dummy_world);
-        let query = Query::new()
-            .with::<i32>()
-            .with::<u64>()
-            .not::<bool>()
-            .changed::<i32>()
-            .make(&local_world);
-
-        //println!("{:#?}", query);
-    }
+mod tests {
 }
 
 
 // Notes
 //
-//  - Queries have two flavors (for now), EntityWise and ComponentWise
-//    > EntityWise collect a set of EntityId's and then filter on components
-//    > ComponentWise collect a set of component types and then filter on component matches
+//  - Queries have two flavors, entity-wise and component-wise
+//    - Entity-wise collect a set of EntityId's and then optionally filter on components
+//    - Component-wise collect a set of component types and then filter on component matches
+// 
+//  - Pseudo Components. Components which are built in, and may not actually store data, but
+//    expose some special functionality to systems
+//    
