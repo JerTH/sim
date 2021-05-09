@@ -73,7 +73,9 @@ pub unsafe fn get_log_channel() -> Sender<LogMessage> {
         LOG_RECEIVER_MUTEX.0.set(Some(Mutex::new(rx)));
         
         // Acquire the rx lock, store the MutexGuard in a RecvGuardTunnel so it
-        // can be passed directly to the log sink thread without unlocking it
+        // can be passed directly to the log sink thread without unlocking it,
+        // spawn the sink thread and hand over the guard. The sink thread can then
+        // process any pending log messages that were sent before it was created
         // 
         // Safety:
         // 
@@ -186,6 +188,7 @@ fn sink(msg: LogMessage) {
     //       - Ensure all data is flushed in the case of Close
     //       - User selectable/created log sinks
     //       - Runtime and compile time log level switches
+
     match msg.contents {
         LogMessageContents::Log(contents) => {
             println!("{}", contents);
@@ -206,6 +209,8 @@ fn sink(msg: LogMessage) {
             println!("Closing log channel");
         },
     }
+    
+    todo!("add log contexts, add buffering of context info, add context indention levels, add detail switches, add internal filter, properly handle program termination and partial log dumps, add file support");
 }
 
 thread_local! {
@@ -259,7 +264,8 @@ macro_rules! fatal {
             let __msg = LogMessage::new(module_path!(), LogMessageContents::Fatal(format!($($arg)*)), );
             log_send!(__tx, __msg);
 
-            ::std::thread::sleep(::std::time::Duration::from_millis(100)); // hack to allow pending log messages to cleanly post
+            // hack to allow pending log messages to (hopefully) post before we kill the process
+            ::std::thread::sleep(::std::time::Duration::from_millis(100)); 
             panic!()
         });
     }

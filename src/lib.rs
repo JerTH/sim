@@ -8,13 +8,15 @@ pub mod cli;
 pub mod constants;
 pub mod identity;
 pub mod collections;
-pub mod conflictgraph;
 
 #[macro_use]
 pub mod debug;
 
 #[macro_use]
 pub mod query;
+
+#[macro_use]
+pub mod conflictgraph;
 
 #[macro_use]
 pub mod world;

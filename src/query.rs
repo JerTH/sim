@@ -282,7 +282,7 @@ macro_rules! impl_query_iter {
 
 
 
-                                Ref::new(component, Some(self.world)) // !!!!!!!!! Need some better mechanism for quickly setting a write dep and checking it
+                                Ref::new(component, Some(self.world)) // !!!!!!!!! TODO: Need some better mechanism for quickly setting a write dep and checking it
                             
                             
                             
@@ -323,7 +323,11 @@ impl_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]; [F, 5]);
 #[derive(Debug)]
 pub struct Ref<'a, T> {
     target: &'a UnsafeCell<T>,
-    world: Option<&'a LocalWorld<'a>>, // Some if the reference is used as immutable, None if the system is known to mutate this component
+
+    // Some if the reference is used as immutable, None if the system is known to mutate this component
+    // 
+    // TODO: Investigate moving this to a thread-local or static check on writes, or some other mechanism which speeds up reference iteration
+    world: Option<&'a LocalWorld<'a>>,
 }
 
 impl<'a, T> Ref<'a, T> {

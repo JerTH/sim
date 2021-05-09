@@ -1,10 +1,10 @@
-use std::{cell::{Cell, RefCell}, collections::HashSet, fmt::Debug};
-use crate::collections::{Get, GetMut, SparseSet};
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, fmt::Debug};
+use crate::{ debug::*, collections::{Get, GetMut, SparseSet} };
 
-/// Flowgraph
-
-pub enum InsertionError<N> where N: ConflictGraphNode {
-    PushFailed(N)
+#[derive(Debug)]
+pub enum ConflictGraphError<N> where N: ConflictGraphNode {
+    PushFailed(N),
+    NodeDoesntExist,
 }
 
 pub trait ConflictGraphNode {
@@ -33,31 +33,39 @@ impl<N: ConflictGraphNode> InnerNode<N> {
 #[derive(Debug)]
 pub struct ConflictGraph<N> where N: ConflictGraphNode {
     nodes: SparseSet<InnerNode<N>>,
+    ready: bool,
 }
 
 impl<N: ConflictGraphNode + Debug> ConflictGraph<N> {
     pub fn new() -> Self {
         Self {
             nodes: SparseSet::new(),
+            ready: false,
         }
     }
 
-    pub fn insert(&mut self, node: N) -> Result<(), ()> {
-        let _insertion_result = self.nodes.insert(InnerNode::new(node));
+    pub fn insert(&mut self, node: N) -> Result<(), ConflictGraphError<N>> {
+        self.nodes.insert(InnerNode::new(node)).map_err(|result| ConflictGraphError::PushFailed(result.outer))?;
+        self.ready = false;
 
         // a conflict can only happen when a write occurs
         // a conflict exists only if two nodes mutate the same dependency, or one node mutates, and one does not
         // create an edge between every node where a conflict exists
 
         self.rebuild()?;
-        self.color()
+        
+        //self.color()?;
+        //self.ready = true;
+
+        Ok(())
     }
 
-    pub fn remove(&mut self) -> Result<N, ()> {
-        Err(())
+    /// Consumes the conflict graph and returns a set of conflict-free cliques as a Vec<Vec<N>>
+    pub fn cliques(self) -> Result<Vec<Vec<N>>, ConflictGraphError<N>> {
+        self.into()
     }
 
-    fn rebuild(&mut self) -> Result<(), ()> {
+    fn rebuild(&mut self) -> Result<(), ConflictGraphError<N>> {
         for (_first_key, first) in self.nodes.kv_pairs() {
             for (second_key, second) in self.nodes.kv_pairs() {
                 let mut conflict = false;
@@ -92,7 +100,7 @@ impl<N: ConflictGraphNode + Debug> ConflictGraph<N> {
         Ok(())
     }
 
-    fn color(&mut self) -> Result<(), ()> {
+    fn color(&mut self) -> Result<(), ConflictGraphError<N>> {
         const UNCOLORED: usize = std::usize::MAX;
         let mut used_colors: Vec<usize> = vec![0usize];
         let mut uncolored_count = self.nodes.len();
@@ -117,11 +125,13 @@ impl<N: ConflictGraphNode + Debug> ConflictGraph<N> {
         }
 
         for node in self.nodes.iter() {
-            //uncolored_count += 1;
             node.color.set(UNCOLORED);
         }
 
+        let mut passes = 0usize;
         while uncolored_count > 0 {
+            passes += 1;
+
             let mut candidate = Candidate::new();
 
             for (_i, (key, node)) in self.nodes.kv_pairs().enumerate() {    
@@ -164,10 +174,10 @@ impl<N: ConflictGraphNode + Debug> ConflictGraph<N> {
                 }
             }
 
-            println!("{:?} nodes, {:?} uncolored", self.nodes.len(), uncolored_count);
-            for (i, node) in self.nodes.iter().enumerate() {
-                println!("node {:?} color {:?}", i, node.color.get())
-            }
+            //println!("{:?} nodes, {:?} uncolored", self.nodes.len(), uncolored_count);
+            //for (i, node) in self.nodes.iter().enumerate() {
+            //    println!("node {:?} color {:?}", i, node.color.get())
+            //}
 
             // choose the "smallest" color for the candidate, excluding its neighbors colors
             'outer: loop {
@@ -180,22 +190,41 @@ impl<N: ConflictGraphNode + Debug> ConflictGraph<N> {
 
                                 break 'outer;
                             },
-                            None => panic!()
+                            None => {
+                                return Err(ConflictGraphError::NodeDoesntExist);
+                            }
                         }
                     }
                 }
-
-                println!("used_colors: {:?}", used_colors);
                 used_colors.push(used_colors.len());
             }
         }
-        
-        println!("\nfinal result");
-        for (i, node) in self.nodes.iter().enumerate() {
-            println!("node {:?} color {:?}\treads {:?}\twrites {:?}", i, node.color.get(), node.outer.dependencies(), node.outer.mutable_dependencies());
-        }
+
+        //log!("conflict graph colored in {:?} passes, used {:?} colors", passes, used_colors.len());
 
         Ok(())
+    }
+}
+
+impl<N> From<ConflictGraph<N>> for Result<Vec<Vec<N>>, ConflictGraphError<N>> where N: ConflictGraphNode + Debug {
+
+    /// Converts the ConflictGraph into an unordered conflict free set of "cliques"
+    ///
+    /// Each inner Vec represents a set of nodes which are mutually conflict free
+    /// while nodes in separate Vec's likely (but aren't guaranteed to) conflict with each other
+    fn from(mut graph: ConflictGraph<N>) -> Self {
+        if !graph.ready {
+            graph.rebuild()?;
+            graph.color()?;
+        }
+        
+        let mut result: HashMap<usize, Vec<N>> = HashMap::new();
+
+        for (i, node) in graph.nodes.into_iter().enumerate() {
+            result.entry(node.color.get()).or_insert_with(|| Vec::default()).push(node.outer);
+        }
+
+        Ok(result.into_iter().map(|item| item.1).collect())
     }
 }
 
@@ -232,21 +261,24 @@ mod tests {
             TestNode { w: vec![3], r: vec![3] },
             TestNode { w: vec![], r: vec![3] },
             TestNode { w: vec![], r: vec![1, 2, 3] },
-            TestNode { w: vec![], r: vec![1, 2] },
-            TestNode { w: vec![], r: vec![1] },
-            TestNode { w: vec![], r: vec![1, 2, 3] },
-            TestNode { w: vec![], r: vec![2, 1] },
-            TestNode { w: vec![], r: vec![3] },
+            TestNode { w: vec![1], r: vec![1, 2] },
+            TestNode { w: vec![2, 3], r: vec![1] },
+            TestNode { w: vec![4], r: vec![1, 2, 3] },
+            TestNode { w: vec![5], r: vec![2, 1] },
+            TestNode { w: vec![4], r: vec![3] },
             TestNode { w: vec![1, 3, 2], r: vec![] },
         ];
 
         let mut graph = ConflictGraph::new();
 
         for node in nodes.iter() {
-            println!("\n--- INSERT ---");
             let _ = graph.insert((*node).clone());
         }
         
-        //println!("{:#?}", graph);
+        let cliques = graph.cliques().unwrap();
+        println!("\n{:?} cliques", cliques.len());
+        for (i, clique) in cliques.iter().enumerate() {
+            println!("\tclique {:?} size {:?}", i, clique.len());
+        }
     }
 }
