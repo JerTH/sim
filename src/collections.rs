@@ -146,7 +146,7 @@ impl<T> SparseSet<T> {
     }
 
     pub fn shrink_to_fit(&mut self) {
-        unimplemented!()
+        todo!()
     }
     
     pub fn capacity(&self) -> usize {
@@ -176,7 +176,7 @@ impl<T> SparseSet<T> {
     /// SparseSet is unordered. Internally, items are free to move around, thus it's not generally useful to
     /// associate a raw index with a key/value pair. This function is declared unsafe to mitigate foot-gun usage.
     /// That said, this is still useful sometimes especially when iterating the contents of the SparseSet
-    pub unsafe fn get_key_value_pair(&self, idx: usize) -> Option<(usize, &T)> {
+    pub unsafe fn get_kv_pair(&self, idx: usize) -> Option<(usize, &T)> {
         // TODO: Revisit this, having an interface to directly get k/v pairs from internal indices isn't ideal
         //
         // Maybe use an iterator that returns k/v's? Investigate if this is even necessary at all
@@ -189,6 +189,13 @@ impl<T> SparseSet<T> {
             Some((*k, v))
         } else {
             None
+        }
+    }
+
+    pub fn kv_pairs(&self) -> KeyValueIter<T> {
+        KeyValueIter {
+            set: self,
+            idx: 0usize,
         }
     }
 
@@ -237,6 +244,21 @@ impl<T> SparseSet<T> {
             } 
         }
         return None
+    }
+}
+
+pub struct KeyValueIter<'a, T> {
+    set: &'a SparseSet<T>,
+    idx: usize,
+}
+
+impl<'a, T> Iterator for KeyValueIter<'a, T> {
+    type Item = (usize, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.idx += 1;
+        
+        unsafe { self.set.get_kv_pair(self.idx - 1) }
     }
 }
 

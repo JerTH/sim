@@ -8,7 +8,7 @@ pub mod cli;
 pub mod constants;
 pub mod identity;
 pub mod collections;
-pub mod flowgraph;
+pub mod conflictgraph;
 
 #[macro_use]
 pub mod debug;

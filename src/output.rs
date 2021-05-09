@@ -114,7 +114,7 @@ impl OutputDevice {
                 // do nothing
             },
             OutputFrequency::Hertz(f) => {
-                unimplemented!();
+                todo!();
             },
             OutputFrequency::Frames(f) => {
                 if sim.present().frame_number() % f as usize > 0 {

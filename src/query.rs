@@ -155,7 +155,7 @@ impl<'a> Query<'a> {
     pub fn cached(local_world: &'a LocalWorld) -> QueryBuilder<'a> {
         if local_world.cached_query_set().contains_key(&local_world.system_execution_id()) {
             // we've cached this query, fetch and return it
-            unimplemented!()
+            todo!()
         } else {
             // this is the first time we've seen this query
             QueryBuilder {

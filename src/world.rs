@@ -1,6 +1,6 @@
 /// World
 
-use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, debug::*, flowgraph::FlowGraphNode, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId, SystemId}, query::{Query}};
+use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, debug::*, conflictgraph::ConflictGraphNode, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId, SystemId}, query::{Query}};
 
 use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, fmt::Debug, usize};
 
@@ -106,8 +106,8 @@ impl World {
                     WorldCommand::ResolveFlowGraph => {
                         // Collect all read-only systems
 
-                        let read_only: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| system.writes.borrow().is_empty()).collect();
-                        let writes: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| !system.writes.borrow().is_empty()).collect();
+                        //let read_only: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| system.writes.borrow().is_empty()).collect();
+                        //let writes: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| !system.writes.borrow().is_empty()).collect();
 
                         // for each system
                         //   for each dep of that system
@@ -172,15 +172,15 @@ impl WorldSystem {
     }
 }
 
-impl FlowGraphNode for WorldSystem {
+impl ConflictGraphNode for WorldSystem {
     type Dependency = ComponentSetId;
 
-    fn write_deps(&self) -> Vec<Self::Dependency> {
-        self.writes.borrow().iter().cloned().collect()
+    fn dependencies(&self) -> Vec<Self::Dependency> {
+        todo!()
     }
 
-    fn read_deps(&self) -> Vec<Self::Dependency> {
-        self.reads.borrow().iter().cloned().collect()
+    fn mutable_dependencies(&self) -> Vec<Self::Dependency> {
+        todo!()
     }
 }
 
@@ -348,7 +348,7 @@ impl<'a> LocalWorld<'a> {
     }
 
     pub(crate) fn cached_query_set(&self) -> std::collections::HashMap<SystemExecutionId, Query> {
-        unimplemented!()
+        todo!()
     }
 
     pub(crate) fn mark_read_dependency<T: Component>(&self) {
