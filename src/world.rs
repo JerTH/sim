@@ -1,6 +1,6 @@
 /// World
 
-use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, debug::*, conflictgraph::ConflictGraphNode, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId, SystemId}, query::{Query}};
+use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, debug::*, conflictgraph::ConflictCmp, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId, SystemId}, query::{Query}};
 
 use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, fmt::Debug, usize};
 
@@ -172,15 +172,32 @@ impl WorldSystem {
     }
 }
 
-impl ConflictGraphNode for WorldSystem {
-    type Dependency = ComponentSetId;
+impl ConflictCmp for WorldSystem {
+    fn conflict_cmp(&self, other: &Self) -> bool {
+        // conflict if two systems write the same data or one node reads and the other node writes
 
-    fn dependencies(&self) -> Vec<Self::Dependency> {
-        todo!()
-    }
+        for read in self.reads.borrow().iter() {
+            for write in other.writes.borrow().iter() {
+                if read == write {
+                    return true
+                }
+            }
+        }
 
-    fn mutable_dependencies(&self) -> Vec<Self::Dependency> {
-        todo!()
+        for write in self.writes.borrow().iter() {
+            for read in other.reads.borrow().iter() {
+                if write == read {
+                    return true
+                }
+            }
+            
+            for other_write in other.writes.borrow().iter() {
+                if write == other_write {
+                    return true
+                }
+            }
+        }
+        return false
     }
 }
 

@@ -210,7 +210,7 @@ fn sink(msg: LogMessage) {
         },
     }
     
-    todo!("add log contexts, add buffering of context info, add context indention levels, add detail switches, add internal filter, properly handle program termination and partial log dumps, add file support");
+    //todo!("add log contexts, add buffering of context info, add context indention levels, add detail switches, add internal filter, properly handle program termination and partial log dumps, add file support");
 }
 
 thread_local! {
