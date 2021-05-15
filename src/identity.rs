@@ -93,6 +93,12 @@ impl LinearId for SystemId {
     }
 }
 
+impl From<usize> for SystemId {
+    fn from(id: usize) -> Self {
+        SystemId(id)
+    }
+}
+
 /// Uniquely identifying opaque ID which can be used to differentiate instances of otherwise identical structures,
 /// or uniquely group a set of instances with an identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

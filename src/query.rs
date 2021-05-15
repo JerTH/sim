@@ -327,6 +327,7 @@ pub struct Ref<'a, T> {
     // Some if the reference is used as immutable, None if the system is known to mutate this component
     // 
     // TODO: Investigate moving this to a thread-local or static check on writes, or some other mechanism which speeds up reference iteration
+    //       CONSIDER: limiting each system to a single query?
     world: Option<&'a LocalWorld<'a>>,
 }
 

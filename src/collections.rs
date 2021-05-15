@@ -4,7 +4,9 @@ extern crate unsafe_any;
 
 pub use unsafe_any::UnsafeAnyExt;
 use std::{fmt::Debug, panic::AssertUnwindSafe};
-use crate::{debug::MemoryUse, identity::EntityId};
+use crate::debug::MemoryUse;
+
+const EMPTY_KEY: usize = std::usize::MAX;
 
 pub enum TryReserveError {
     CapacityOverflow,
@@ -21,18 +23,12 @@ pub(crate) trait GetMut<I> {
     fn get_mut(&mut self, idx: I) -> Option<&mut Self::Item>;
 }
 
-pub trait EntityIndexible {
-    fn index_to_id(&self, idx: usize) -> Option<EntityId>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SparseSet<T> {
     sparse: Vec<usize>,
     dense: Vec<usize>,
     data: Vec<T>,
 }
-
-const EMPTY_KEY: usize = std::usize::MAX;
 
 impl<T> SparseSet<T> {
     pub fn new() -> SparseSet<T> {
@@ -44,14 +40,16 @@ impl<T> SparseSet<T> {
     }
     
     /// Returns true if the `SparseSet` contains an item for `key`
-    pub fn contains(&self, key: usize) -> bool {
-        self.get_idx(key).is_some()
+    pub fn contains<K>(&self, key: K) -> bool where K: Into<usize> {
+        self.get_idx(key.into()).is_some()
     }
 
     /// Inserts the item with the given key, if there is already a stored item associated with the key, returns Some(stored)
     /// 
     /// Returns None if there wasn't 
-    pub fn insert_with(&mut self, key: usize, item: T) -> Option<T> {
+    pub fn insert_with<K>(&mut self, key: K, item: T) -> Option<T> where K: Into<usize> {
+        let key = key.into();
+
         while key >= self.capacity() {
             let result = self.reserve( core::cmp::max(1usize,self.len()));
         }
@@ -84,7 +82,9 @@ impl<T> SparseSet<T> {
         }
     }
     
-    pub fn remove(&mut self, key: usize) -> Option<T> {
+    pub fn remove<K>(&mut self, key: K) -> Option<T> where K: Into<usize>  {
+        let key = key.into();
+
         if let Some(idx) = self.get_idx(key) {
             let swap = *self.dense.last().unwrap();
             let (_, item) = (self.dense.swap_remove(idx), self.data.swap_remove(idx));

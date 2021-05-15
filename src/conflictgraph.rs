@@ -1,10 +1,31 @@
-use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, fmt::Debug};
-use crate::{ debug::*, collections::{Get, GetMut, SparseSet} };
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, error::Error, fmt::{Debug, Display}};
+use crate::{ debug::*, collections::{Get, SparseSet} };
+
+const UNCOLORED: usize = std::usize::MAX;
 
 #[derive(Debug)]
-pub enum ConflictGraphError<N> where N: ConflictCmp {
-    InsertFailed(N),
+pub enum ConflictGraphError {
+    InsertFailed,
     NodeDoesntExist,
+    UnresolvedConflict,
+    UncoloredNode,
+}
+
+impl Display for ConflictGraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsertFailed => { write!(f, "failed to insert into internal set") }
+            Self::NodeDoesntExist => { write!(f, "node doesn't exist") }
+            Self::UnresolvedConflict => { write!(f, "unresolved conflict") }
+            Self::UncoloredNode => { write!(f, "uncolored node") }
+        }
+    }
+}
+
+impl Error for ConflictGraphError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
 }
 
 pub trait ConflictCmp {
@@ -14,14 +35,10 @@ pub trait ConflictCmp {
 #[derive(Debug, Clone)]
 struct InnerNode<N: ConflictCmp> {
     udata: N,
+
+    // using cells here is for graph convenience
     edges: RefCell<HashSet<usize>>,
     color: Cell<usize>,
-}
-
-impl<N> ConflictCmp for InnerNode<N> where N: ConflictCmp {
-    fn conflict_cmp(&self, other: &Self) -> bool {
-        self.udata.conflict_cmp(&other.udata)
-    }
 }
 
 impl<N: ConflictCmp> InnerNode<N> {
@@ -34,24 +51,33 @@ impl<N: ConflictCmp> InnerNode<N> {
     }
 }
 
+/// Defer to the external types ConflictCmp impl
+impl<N> ConflictCmp for InnerNode<N> where N: ConflictCmp {
+    fn conflict_cmp(&self, other: &Self) -> bool {
+        self.udata.conflict_cmp(&other.udata)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConflictGraph<N> where N: ConflictCmp {
     nodes: SparseSet<InnerNode<N>>,
 }
 
-impl<N: ConflictCmp + Debug> ConflictGraph<N> {
+impl<N: ConflictCmp> ConflictGraph<N> {
     pub fn new() -> Self {
         Self {
             nodes: SparseSet::new(),
         }
     }
     
-    pub fn insert(&mut self, node: N) -> Result<usize, ConflictGraphError<N>> {
-        let key = self.nodes
+    /// Insert a new node
+    /// ConflictGraph only supports insertion, it does not support removal or access to its contents, it is not a container
+    pub fn insert(&mut self, node: N) -> Result<(), ConflictGraphError> {
+        let _ = self.nodes
             .insert(InnerNode::new(node))
-            .map_err(|result| ConflictGraphError::InsertFailed(result.udata))?;
+            .map_err(|result| ConflictGraphError::InsertFailed)?;
 
-        Ok(key)
+        Ok(())
     }
 
     /// Consumes the conflict graph and returns a set of conflict-free cliques as a Vec<Vec<N>>
@@ -59,14 +85,13 @@ impl<N: ConflictCmp + Debug> ConflictGraph<N> {
     /// Each inner Vec represents a group of items which do not conflict with one another based on their ConflictCmp implementation
     ///
     /// Not currently guaranteed to produce the smallest number of cliques possible, but makes a reasonable effort
-    pub fn cliques(mut self) -> Result<Vec<Vec<N>>, ConflictGraphError<N>> {
+    pub fn cliques(mut self) -> Result<Vec<Vec<N>>, ConflictGraphError> {
         self.rebuild()?;
         self.color()?;
         self.into()
     }
 
-    fn rebuild(&mut self) -> Result<(), ConflictGraphError<N>> {
-
+    fn rebuild(&mut self) -> Result<(), ConflictGraphError> {
         // clear existing edges and start from scratch
         for node in self.nodes.iter() {
             node.edges.borrow_mut().clear();
@@ -89,8 +114,7 @@ impl<N: ConflictCmp + Debug> ConflictGraph<N> {
         Ok(())
     }
     
-    fn color(&mut self) -> Result<(), ConflictGraphError<N>> {
-        const UNCOLORED: usize = std::usize::MAX;
+    fn color(&mut self) -> Result<(), ConflictGraphError> {
         let mut used_colors: Vec<usize> = vec![];
 
         // quick and dirty helper struct, only used in this function for clarities sake
@@ -188,33 +212,41 @@ impl<N: ConflictCmp + Debug> ConflictGraph<N> {
             }
         }
 
+        self.check()?;
+
+        log_context!(("graph"){
+            debug!("conflict graph of {} nodes colored in {:?} passes, used {:?} colors", self.nodes.len(), passes, used_colors.len());
+        });
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn check(&self) -> Result<(), ConflictGraphError> {
         for node in self.nodes.iter().enumerate() {
             for other in self.nodes.iter().enumerate() {
                 if node.0 != other.0 {
+
+                    // uncolored nodes indicate an invalid graph
+                    if node.1.color.get() == UNCOLORED { return Err(ConflictGraphError::UncoloredNode) }
+                    if other.1.color.get() == UNCOLORED { return Err(ConflictGraphError::UncoloredNode) }
+
                     match node.1.conflict_cmp(other.1) {
                         true => {
-                            if node.1.color.get() == other.1.color.get() {
-                                println!("{:#?}", node);
-                                println!();
-                                println!("{:#?}", other);
-                                assert_ne!(node.1.color, other.1.color);
-                            }
+                            if node.1.color.get() == other.1.color.get() { return Err(ConflictGraphError::UnresolvedConflict) }
                         },
                         false => {
+                            // no conflict expected
                         }
                     }
                 }
             }
         }
-
-        log!("conflict graph of {} nodes colored in {:?} passes, used {:?} colors", self.nodes.len(), passes, used_colors.len());
-        
         Ok(())
     }
 }
 
-impl<N> From<ConflictGraph<N>> for Result<Vec<Vec<N>>, ConflictGraphError<N>> where N: ConflictCmp + Debug {
-
+impl<N> From<ConflictGraph<N>> for Result<Vec<Vec<N>>, ConflictGraphError> where N: ConflictCmp {
     /// Converts the ConflictGraph into an unordered conflict free set of "cliques"
     ///
     /// Each inner Vec represents a set of nodes which are mutually conflict free
@@ -241,7 +273,7 @@ mod tests {
         unsafe { 
             if _QUICK_RAND_SEED == 0 {
                 _QUICK_RAND_SEED = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_micros();
-                println!("quick rand seed: {:?}", _QUICK_RAND_SEED);
+                debug!("quick rand seed: {:?}", _QUICK_RAND_SEED);
             }
 
             let a = 492876863; // some big primes
@@ -350,6 +382,13 @@ mod tests {
     fn test_cliques() {
         println!("");
 
+        log_context!(("test") {
+
+            log_context!(("asjhdbaskdb") {
+                debug!("test message");
+            });
+            
+            
         let nodes = [
             TestNode { writes: vec![0], reads: vec![0] },
             TestNode { writes: vec![1], reads: vec![1] },
@@ -361,8 +400,9 @@ mod tests {
             TestNode { writes: vec![8], reads: vec![8] },
         ];
         
+        
         expect_cliques(1, validate_conflict_free(do_graph(&nodes)));
-
+        
         let nodes = [
             TestNode { writes: vec![0], reads: vec![0] },
             TestNode { writes: vec![0], reads: vec![1] },
@@ -373,7 +413,7 @@ mod tests {
             TestNode { writes: vec![0], reads: vec![0] },
             TestNode { writes: vec![0], reads: vec![1] },
         ];
-
+        
         expect_cliques(8, validate_conflict_free(do_graph(&nodes)));
 
         let nodes = [
@@ -402,9 +442,10 @@ mod tests {
 
         expect_cliques(6, validate_conflict_free(do_graph(&nodes)));
 
-        // test some random input
+        debug!("beginning random data test");
         
-        const ITERATIONS: usize = 1000;
+        // test some random input
+        const ITERATIONS: usize = 10;
         for i in 0..ITERATIONS {
             let max_nodes: usize = 40;
             let max_writes: usize = 2;
@@ -442,5 +483,6 @@ mod tests {
         }
 
         ::std::thread::sleep(::std::time::Duration::from_millis(10));
+        });
     }
 }

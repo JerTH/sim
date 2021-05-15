@@ -1,6 +1,20 @@
 
 use std::{cell::{Cell, RefCell}, sync::{Mutex, MutexGuard, Once, mpsc::{ channel, Sender, Receiver }}, thread::{self, JoinHandle, ThreadId}, time::Instant};
 
+// TODO
+//   Implement debug instrumentation and built in profiling
+//
+//   Logging:
+//     add compile time switches
+//     add log contexts,
+//     add buffering of context info,
+//     add context indention levels,
+//     add detail switches,
+//     add internal filter,
+//     properly handle program termination and partial log dumps,
+//     add file support
+
+
 pub trait MemoryUse {
     fn memory_use_estimate(&self) -> usize;
 }
@@ -12,23 +26,28 @@ pub enum LogMessageContents {
     Error(String),
     Debug(String),
     Fatal(String),
+    OpenContext,
+    CloseContext,
+    HorizontalLine,
     Close,
 }
 
 #[derive(Debug)]
 pub struct LogMessage {
-    thread: ThreadId,
     time: Instant,
+    thread: ThreadId,
     module: &'static str,
+    context: Option<(usize, &'static str)>,
     contents: LogMessageContents,
 }
 
 impl LogMessage {
-    pub fn new(module: &'static str, contents: LogMessageContents) -> Self {
+    pub fn new(context: Option<(usize, &'static str)>, module: &'static str, contents: LogMessageContents) -> Self {
         LogMessage {
             time: ::std::time::Instant::now(),
             thread: ::std::thread::current().id(),
             module: module,
+            context: context,
             contents: contents,
         }
     }
@@ -158,6 +177,7 @@ pub unsafe fn cleanup_log_channel() {
         time: Instant::now(),
         thread: thread::current().id(),
         module: module_path!(),
+        context: None,
         contents: LogMessageContents::Close,
     });
 
@@ -184,17 +204,25 @@ pub unsafe fn cleanup_log_channel() {
 }
 
 fn sink(msg: LogMessage) {
-    // Todo: - Write messages to some structure, periodically dump data into the output
+    // TODO: make this reference a lazy static sink struct that can be stateful
+    // TODO: - Write messages to some structure, periodically dump data into the output
     //       - Ensure all data is flushed in the case of Close
     //       - User selectable/created log sinks
     //       - Runtime and compile time log level switches
 
-    match msg.contents {
+    // when printing messages with context from multiple threads try to buffer a few messages
+    // and then print one threads messages all at once, or as many as you can, with the full
+    // context and indent tree preceding them each time
+
+    let tab_spacing = 4;
+    let (indent, context) = msg.context.unwrap_or_default();
+    let indent = indent * tab_spacing;
+    match &msg.contents {
         LogMessageContents::Log(contents) => {
             println!("{}", contents);
         },
         LogMessageContents::Debug(contents) => {
-            println!("[DEBUG] {}", contents);
+            println!("[DEBUG]{:ind$}({ctx}) {con}", "", ctx=context, con=contents, ind=indent);
         },
         LogMessageContents::Warn(contents) => {
             println!("[WARNING] {}", contents);
@@ -208,22 +236,68 @@ fn sink(msg: LogMessage) {
         LogMessageContents::Close => {
             println!("Closing log channel");
         },
+        LogMessageContents::HorizontalLine => {
+            println!("{:ind$}", "-", ind=40);
+        },
+        LogMessageContents::OpenContext => {
+
+        },
+        LogMessageContents::CloseContext => {
+            
+        }
     }
-    
-    //todo!("add log contexts, add buffering of context info, add context indention levels, add detail switches, add internal filter, properly handle program termination and partial log dumps, add file support");
+}
+
+pub struct LogDevice {
+    pub context: Option<(usize, &'static str)>,
+    pub tx: Sender<LogMessage>,
+}
+
+impl LogDevice {
+    pub fn with_context(context: Option<(usize, &'static str)>) -> Self {
+        let mut device = Self::default();
+        device.context = context;
+        device
+    }
+
+    pub fn from_original(original: Option<Self>, context: Option<(usize, &'static str)>) -> Self {
+        match original {
+            Some(device) => {
+                return LogDevice {
+                    tx: device.tx,
+                    context: context,
+                };
+            },
+            None => {
+                return LogDevice::with_context(context);
+            }
+        }
+    }
+}
+
+impl Default for LogDevice {
+    fn default() -> Self {
+        LogDevice {
+            context: None,
+            tx: unsafe { crate::debug::get_log_channel() },
+        }
+    }
 }
 
 thread_local! {
-    pub static LOG_TX_THREAD_LOCAL: RefCell<Option<Sender<LogMessage>>> = RefCell::new(None); 
+    pub static LOG_TX_THREAD_LOCAL: RefCell<Option<LogDevice>> = RefCell::new(None); 
 }
 
 #[allow(unused_macros)]
 macro_rules! debug {
     ($($arg:tt)*) => {
-        LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage::new(module_path!(), LogMessageContents::Debug(format!($($arg)*)), );
-            log_send!(__tx, __msg);
-        });
+        #[cfg(any(debug_assertions, feature = "debug_log"))]
+        {
+            LOG_TX_THREAD_LOCAL.with(|__tx| {
+                let __contents = LogMessageContents::Debug(format!($($arg)*));
+                log_send!(__tx, __contents);
+            });
+        }
     }
 }
 
@@ -231,8 +305,8 @@ macro_rules! debug {
 macro_rules! log {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage::new(module_path!(), LogMessageContents::Log(format!($($arg)*)), );
-            log_send!(__tx, __msg);
+            let __contents = LogMessageContents::Log(format!($($arg)*));
+            log_send!(__tx, __contents);
         });
     }
 }
@@ -241,8 +315,8 @@ macro_rules! log {
 macro_rules! warn {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage::new(module_path!(), LogMessageContents::Warn(format!($($arg)*)), );
-            log_send!(__tx, __msg);
+            let __contents = LogMessageContents::Warn(format!($($arg)*));
+            log_send!(__tx, __contents);
         });
     }
 }
@@ -251,8 +325,8 @@ macro_rules! warn {
 macro_rules! error {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage::new(module_path!(), LogMessageContents::Error(format!($($arg)*)), );
-            log_send!(__tx, __msg);
+            let __contents = LogMessageContents::Error(format!($($arg)*));
+            log_send!(__tx, __contents);
         });
     }
 }
@@ -261,8 +335,8 @@ macro_rules! error {
 macro_rules! fatal {
     ($($arg:tt)*) => {
         LOG_TX_THREAD_LOCAL.with(|__tx| {
-            let __msg = LogMessage::new(module_path!(), LogMessageContents::Fatal(format!($($arg)*)), );
-            log_send!(__tx, __msg);
+            let __contents = LogMessageContents::Fatal(format!($($arg)*));
+            log_send!(__tx, __contents);
 
             // hack to allow pending log messages to (hopefully) post before we kill the process
             ::std::thread::sleep(::std::time::Duration::from_millis(100)); 
@@ -272,26 +346,86 @@ macro_rules! fatal {
 }
 
 macro_rules! log_send {
-    ($tx:expr, $msg:expr) => {
-        let __tx = $tx.as_ptr();
-        let __msg = $msg;
+    ($tx:expr, $contents:expr) => {
+        let __contents = $contents;
+
+        #[allow(unused_unsafe)] // not actually unused, but we get a warning otherwise, probably a compiler bug
         unsafe {
-            if (*__tx).is_some() {
-                let __res = (*__tx).as_ref().unwrap().send(__msg);
-            } else {
-                __tx.replace( Some(crate::debug::get_log_channel()) );
-                let __res = (*__tx).as_ref().unwrap().send(__msg);
+            match &mut *$tx.as_ptr() {
+                Some(__tx) => {
+                    let __msg = LogMessage::new(__tx.context, module_path!(), __contents);
+                    let __res = __tx.tx.send(__msg);
+                },
+                None => {
+                    $tx.replace(Some(LogDevice::default()));
+                    match &mut *$tx.as_ptr() {
+                        Some(__tx) => {
+                            let __msg = LogMessage::new(__tx.context, module_path!(), __contents);
+                            let __res = __tx.tx.send(__msg);
+                        },
+                        None => {
+                            unreachable!()
+                        }
+                    }
+                }
             }
         }
     };
 }
 
+#[allow(unused_macros)]
+macro_rules! log_context {
+    (($name:expr) {$($body:tt)*}) => {
+        LOG_TX_THREAD_LOCAL.with(|__tx| {
+            let mut __previous_context: Option<(usize, &'static str)> = None;
+            
+            unsafe {
+                match &mut *__tx.as_ptr() {
+                    Some(__tx) => {
+                        __previous_context = __tx.context;
+                        match __tx.context {
+                            Some(mut __context) => {
+                                //println!("setting context to {:?}, Some, Some", $name);
+                                __tx.context = Some((__context.0 + 1, $name));
+                                //println!("context: {:?}", __context);
+                            },
+                            None => {
+                                //println!("setting context to {:?}, Some, None", $name);
+                                __tx.context = Some((0usize, $name));
+                            },
+                        };
+                        //println!("context: {:?}", __tx.context);
+                    },
+                    None => {
+                        //println!("setting context to {:?}, None", $name);
+                        __tx.replace(Some(LogDevice::with_context(Some((0usize, $name)))));
+                    },
+                };
+            }
 
+            $(
+                $body
+            )*
+
+            {
+                //let __temp = __tx.take();
+                //println!("setting context to {:?}", __previous_context);
+                __tx.replace(Some(LogDevice::from_original(__tx.take(), __previous_context)));
+            }
+        })
+    };
+}
 
 
 
 pub fn foo() {
     log!("foo");
+    
+    let mut a = 0;
+
+    log_context!(("foo") {
+        a += 2;
+    })
 }
 
 #[cfg(test)]
