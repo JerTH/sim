@@ -591,7 +591,7 @@ impl Simulation {
                     body_kinematic._position += (body_kinematic._velocity * self.timestep).into(); // velocity then position
                 }
             }
-
+            
             IntegrationMethod::VelocityVerlet => {
                 self.clear_accelerations_and_spatially_dependent_forces(&mut frame);
                 self.calculate_spatially_dependent_forces(&mut frame);

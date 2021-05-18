@@ -1,5 +1,5 @@
 
-use std::{cell::{Cell, RefCell}, sync::{Mutex, MutexGuard, Once, mpsc::{ channel, Sender, Receiver }}, thread::{self, JoinHandle, ThreadId}, time::Instant};
+use std::{cell::{Cell, RefCell}, sync::{Mutex, MutexGuard, Once, mpsc::{ channel, Sender, Receiver }}, thread::{self, JoinHandle, ThreadId}, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 // TODO
 //   Implement debug instrumentation and built in profiling
@@ -32,9 +32,25 @@ pub enum LogMessageContents {
     Close,
 }
 
+impl LogMessageContents {
+    fn type_string(&self) -> &str {
+        match self {
+            Self::Log(_) => "log",
+            Self::Warn(_) => "warning",
+            Self::Error(_) => "error",
+            Self::Debug(_) => "debug",
+            Self::Fatal(_) => "fatal",
+            Self::OpenContext => "open_context",
+            Self::CloseContext => "close_context",
+            Self::HorizontalLine => "horizontal_line",
+            Self::Close => "close",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LogMessage {
-    time: Instant,
+    time: SystemTime,
     thread: ThreadId,
     module: &'static str,
     context: Option<(usize, &'static str)>,
@@ -44,8 +60,8 @@ pub struct LogMessage {
 impl LogMessage {
     pub fn new(context: Option<(usize, &'static str)>, module: &'static str, contents: LogMessageContents) -> Self {
         LogMessage {
-            time: ::std::time::Instant::now(),
-            thread: ::std::thread::current().id(),
+            time: SystemTime::now(),
+            thread: thread::current().id(),
             module: module,
             context: context,
             contents: contents,
@@ -68,10 +84,107 @@ impl LogTx {
     }
 }
 
+trait LogSink {
+    fn handle_message(&self, message: LogMessage);
+}
+
+/// The default log sink
+///
+/// Stateless. Simply prints log messages to standard out as it receives them
+struct DefaultLogSink {}
+
+impl DefaultLogSink {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl LogSink for DefaultLogSink {
+    fn handle_message(&self, message: LogMessage) {
+        let message_context = message.context;
+        let time_seconds = message.time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let time_subsec = message.time.duration_since(UNIX_EPOCH).unwrap_or_default().subsec_micros();
+        
+        let context_string = match message_context {
+            Some((_nesting, context)) => {
+                format!("{}:{}", message.contents.type_string(), context.split_whitespace().collect::<String>())
+            },
+            None => {
+                format!("{}", message.contents.type_string())
+            }
+        };
+        
+        //println!("\x1b[1;31mbold red text\x1b[0m");
+        //println!("\x1b[1;93mbold yellow text\x1b[0m");
+        
+        let time_string = format!("{}.{}", time_seconds, time_subsec);
+
+        //let contents = "test message";
+        //println!("\n{time} - {cont}", time=time_string, cont=contents);
+        //println!("{time} [\x1b[0;35m{ctx}\x1b[0m] - {cont}", ctx="debug:testmodule", time=time_string, cont=contents);
+        //println!("{time} [\x1b[0;33m{ctx}\x1b[0m] - {cont}", ctx="warning:testmodule", time=time_string, cont=contents);
+        //println!("{time} [\x1b[0;31m{ctx}\x1b[0m] - {cont}", ctx="error:testmodule", time=time_string, cont=contents);
+        //println!("\x1b[0;41m{time} [{ctx}] - {cont}\x1b[0m", ctx="fatal:testmodule".to_uppercase(), time=time_string, cont=contents.to_uppercase());
+        //println!("closing log channel");
+
+        match &message.contents {
+            LogMessageContents::Log(contents) => {
+                println!("{time} - {cont}", time=time_string, cont=contents);
+            },
+            LogMessageContents::Debug(contents) => {
+                println!("{time} [\x1b[0;35m{ctx}\x1b[0m] - {cont}", ctx=context_string, time=time_string, cont=contents);
+            },
+            LogMessageContents::Warn(contents) => {
+                println!("{time} [\x1b[0;33m{ctx}\x1b[0m] - {cont}", ctx=context_string, time=time_string, cont=contents);
+            },
+            LogMessageContents::Error(contents) => {
+                println!("{time} [\x1b[0;31m{ctx}\x1b[0m] - {cont}", ctx=context_string, time=time_string, cont=contents);
+            }
+            LogMessageContents::Fatal(contents) => {
+                println!("\x1b[1;41m{time} [{ctx}] - {cont}\x1b[0m", ctx=context_string.to_uppercase(), time=time_string, cont=contents.to_uppercase());
+            },
+            LogMessageContents::Close => {
+                // do nothing
+            },
+            LogMessageContents::HorizontalLine => {
+                // do nothing
+            },
+            LogMessageContents::OpenContext => {
+                // do nothing
+            },
+            LogMessageContents::CloseContext => {
+                // do nothing
+            }
+        }
+    }
+}
+
+fn set_log_sink(sink: Box<dyn LogSink>) -> Option<Box<dyn LogSink>> {
+    unsafe {
+        match LOG_SINK.get_mut() {
+            Some(mutex) => {
+                match mutex.lock() {
+                    Ok(mut old_sink) => {
+                        return Some(std::mem::replace(&mut *old_sink, sink));
+                    },
+                    Err(e) => {
+                        todo!("handle log sink mutex poisoning, {:?}", e);
+                    }
+                }
+            },
+            None => {
+                LOG_SINK.set(Some(Mutex::new(sink)));
+            }
+        }
+        return None
+    }
+}
+
 static mut LOG_INIT_ONCE: Once = Once::new();
 static mut LOG_SENDER_MUTEX: LogTx = LogTx::new();
 static mut LOG_RECEIVER_MUTEX: LogRx = LogRx::new();
-static mut LOG_SINK_JOIN_HANDLE: Cell<Option<JoinHandle<RecvGuardTunnel>>> = Cell::new(None);
+static mut LOG_RECEIVER_JOIN_HANDLE: Cell<Option<JoinHandle<RecvGuardTunnel>>> = Cell::new(None);
+static mut LOG_SINK: Cell<Option<Mutex<Box<dyn LogSink>>>> = Cell::new(None);
 
 // Warning: Implementing 'Send' for a 'MutexGuard' is unsafe and can lead to undefined behavior.
 // 
@@ -83,6 +196,36 @@ static mut LOG_SINK_JOIN_HANDLE: Cell<Option<JoinHandle<RecvGuardTunnel>>> = Cel
 // the lock for the entire program duration.
 struct RecvGuardTunnel<'a>(MutexGuard<'a, Receiver<LogMessage>>);
 unsafe impl<'a> Send for RecvGuardTunnel<'a> {}
+
+/// Reciever thread function. There should only ever be one of these running
+fn log_reciever_fn(guard_tunnel: RecvGuardTunnel) -> RecvGuardTunnel {
+    let receiver_guard = guard_tunnel.0;
+
+    loop {
+        let mut close = false;
+        match receiver_guard.recv() {
+            Ok(msg) => {
+                match msg.contents {
+                    LogMessageContents::Close => {
+                        close = true;
+                        sink(msg);
+                    },
+                    _ => {
+                        sink(msg);
+                    }
+                }
+            },
+            Err(_e) => {
+                // TODO: do something with the RecvError
+                return RecvGuardTunnel(receiver_guard);
+            }
+        }
+            
+        if close {
+            return RecvGuardTunnel(receiver_guard);
+        }
+    }
+}
 
 pub unsafe fn get_log_channel() -> Sender<LogMessage> {
     LOG_INIT_ONCE.call_once(|| {
@@ -119,39 +262,13 @@ pub unsafe fn get_log_channel() -> Sender<LogMessage> {
             }
         };
 
-        // Spawn the log sink thread
-        let handle = thread::spawn(move || {
-            let receiver_guard = guard_tunnel.0;
+        // Setup the log sink
+        set_log_sink(Box::new(DefaultLogSink::new()));
 
-            // receiver loop
-            loop {
-                let mut close = false;
-                match receiver_guard.recv() {
-                    Ok(msg) => {
-                        match msg.contents {
-                            LogMessageContents::Close => {
-                                close = true;
-                                sink(msg);
-                            },
-                            _ => {
-                                sink(msg);
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        println!("Log channel recv failed: {:?}", e);
-                        return RecvGuardTunnel(receiver_guard)
-                    }
-                }
+        // Spawn the reciever thread
+        let handle = thread::spawn(move || log_reciever_fn(guard_tunnel));
 
-                if close {
-                    println!("Closing log sink thread");
-                    return RecvGuardTunnel(receiver_guard)
-                }
-            }
-        });
-        
-        LOG_SINK_JOIN_HANDLE.set(Some(handle));
+        LOG_RECEIVER_JOIN_HANDLE.set(Some(handle));
     }); // end of LOG_INIT_ONCE
 
     // get_log_channel logic
@@ -174,14 +291,14 @@ pub unsafe fn get_log_channel() -> Sender<LogMessage> {
 
 pub unsafe fn cleanup_log_channel() {
     let _ = get_log_channel().send(LogMessage {
-        time: Instant::now(),
+        time: SystemTime::now(),
         thread: thread::current().id(),
         module: module_path!(),
         context: None,
         contents: LogMessageContents::Close,
     });
 
-    match LOG_SINK_JOIN_HANDLE.take() {
+    match LOG_RECEIVER_JOIN_HANDLE.take() {
         Some(handle) => {
             match handle.join() {
                 Ok(guard_tunnel) => {
@@ -204,46 +321,24 @@ pub unsafe fn cleanup_log_channel() {
 }
 
 fn sink(msg: LogMessage) {
-    // TODO: make this reference a lazy static sink struct that can be stateful
-    // TODO: - Write messages to some structure, periodically dump data into the output
+    // TODO: - Buffer messages as they come in to reduce mutex locks
+    // TODO: - Sink that periodically dumps contextual data into the output
     //       - Ensure all data is flushed in the case of Close
-    //       - User selectable/created log sinks
     //       - Runtime and compile time log level switches
 
-    // when printing messages with context from multiple threads try to buffer a few messages
-    // and then print one threads messages all at once, or as many as you can, with the full
-    // context and indent tree preceding them each time
+    // TODO: - When printing messages with context from multiple threads try to buffer a few messages
+    //         and then print one threads messages all at once, or as many as you can, with the full
+    //         context and indent tree preceding them each time
 
-    let tab_spacing = 4;
-    let (indent, context) = msg.context.unwrap_or_default();
-    let indent = indent * tab_spacing;
-    match &msg.contents {
-        LogMessageContents::Log(contents) => {
-            println!("{}", contents);
+    // TODO: - better/more efficient mechanism than a mutex for mainting the log sink/swapping it
+    
+    match unsafe { &*LOG_SINK.as_ptr() } {
+        Some(sink) => {
+            sink.lock().unwrap().handle_message(msg);
         },
-        LogMessageContents::Debug(contents) => {
-            println!("[DEBUG]{:ind$}({ctx}) {con}", "", ctx=context, con=contents, ind=indent);
-        },
-        LogMessageContents::Warn(contents) => {
-            println!("[WARNING] {}", contents);
-        },
-        LogMessageContents::Error(contents) => {
-            println!("[ERROR] {}", contents);
-        },
-        LogMessageContents::Fatal(contents) => {
-            println!("[FATAL] {}", contents);
-        },
-        LogMessageContents::Close => {
-            println!("Closing log channel");
-        },
-        LogMessageContents::HorizontalLine => {
-            println!("{:ind$}", "-", ind=40);
-        },
-        LogMessageContents::OpenContext => {
-
-        },
-        LogMessageContents::CloseContext => {
-            
+        None => {
+            set_log_sink(Box::new(DefaultLogSink::new()));
+            sink(msg);
         }
     }
 }
@@ -385,19 +480,14 @@ macro_rules! log_context {
                         __previous_context = __tx.context;
                         match __tx.context {
                             Some(mut __context) => {
-                                //println!("setting context to {:?}, Some, Some", $name);
                                 __tx.context = Some((__context.0 + 1, $name));
-                                //println!("context: {:?}", __context);
                             },
                             None => {
-                                //println!("setting context to {:?}, Some, None", $name);
                                 __tx.context = Some((0usize, $name));
                             },
                         };
-                        //println!("context: {:?}", __tx.context);
                     },
                     None => {
-                        //println!("setting context to {:?}, None", $name);
                         __tx.replace(Some(LogDevice::with_context(Some((0usize, $name)))));
                     },
                 };
@@ -408,24 +498,10 @@ macro_rules! log_context {
             )*
 
             {
-                //let __temp = __tx.take();
-                //println!("setting context to {:?}", __previous_context);
                 __tx.replace(Some(LogDevice::from_original(__tx.take(), __previous_context)));
             }
         })
     };
-}
-
-
-
-pub fn foo() {
-    log!("foo");
-    
-    let mut a = 0;
-
-    log_context!(("foo") {
-        a += 2;
-    })
 }
 
 #[cfg(test)]
@@ -434,20 +510,21 @@ mod test {
 
     #[test]
     fn test_debug_log() {
-        for i in 0..10 {
-            thread::spawn(move || {
-                for j in 0..1 {
-                    log!("test log {}:{}", i, j);
-                    warn!("test warn {}:{}", i, j);
-                    error!("test error {}:{}", i, j);
-                }
-            });
-        }
+        log!("plain log message");
+        debug!("debug log message");
+        warn!("warning log message");
+        error!("error log message");
 
         thread::sleep(std::time::Duration::from_millis(100));
 
         unsafe {
             cleanup_log_channel()
         };
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_fatal_log() {
+        fatal!("fatal log message"); // this should panic
     }
 }

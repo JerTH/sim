@@ -1,6 +1,7 @@
-use std::{cell::UnsafeCell, fmt::Debug, ops::{Deref, DerefMut}};
+use std::{cell::UnsafeCell, fmt::Debug, ops::{Deref, DerefMut}, sync::{MutexGuard, RwLockReadGuard}};
 
-use crate::{collections::{Get}, debug::*, world::{Component, ComponentSet, ComponentSetId, IntoCoordinate, LocalWorld}};
+use crate::{collections::{Get}, components::{Component, ComponentSet, ComponentSetId}, debug::*, world::{IntoCoordinate, LocalWorld}};
+use crate::systems::DependencyType;
 
 #[derive(Debug, Copy, Clone)]
 pub enum QueryFilter {
@@ -165,21 +166,34 @@ impl<'a> Query<'a> {
             }
         }
     }
-
-    fn get_component_sets(&self) -> Vec<&'a ComponentSet> {
-        let mut component_sets = Vec::new();
-        for set_id in &self.components {
-            if let Some(set) = self.world.component_set_from_id(*set_id) {
-                component_sets.push(set)
+    
+    /// Collects the required components from the world and returns them as raw pointers
+    ///
+    /// SAFETY:
+    ///
+    /// Because components are only ever accessed in parallel by systems, safety is
+    /// guaranteed though the system tree, which only allows systems to run in parallel
+    /// which satisfy mutability rules
+    unsafe fn get_required_components<'b>(&self) -> Vec<*mut ComponentSet> {
+        let mut components = Vec::new();
+        
+        for component_set_id in self.components.iter() {
+            match self.world.get_component_set(*component_set_id) {
+                Some(guard) => {
+                    components.push(guard);
+                },
+                None => {
+                    warn!("failed to lock required component set");
+                }
             }
         }
-        component_sets
+        components
     }
 }
 
 pub struct QueryIter<'a, T> {
     world: &'a LocalWorld<'a>,
-    ordered_components: Vec<&'a ComponentSet>,
+    ordered_components: Vec<*mut ComponentSet>,
     min_set_index: usize,
     iteration_index: usize,
     maximum_iterations: usize,
@@ -187,19 +201,31 @@ pub struct QueryIter<'a, T> {
 }
 
 pub trait IntoQueryIter<'a, T> {
-    fn into_iter(&self) -> QueryIter<'a, T>;
+    unsafe fn into_iter(&self) -> QueryIter<'a, T>;
 }
 
+/// Implements the transformation from a Query into a QueryIter
 #[allow(unused_macros)]
 macro_rules! impl_into_query_iter {
     ($([$comp:ident, $index:expr]);*) => {
+
         #[allow(unused_parens)]
         #[allow(non_snake_case)]
         impl<'a, $($comp),*> IntoQueryIter<'a, ($($comp),*,)> for Query<'a>
         where $($comp: Component),*
         {
-            fn into_iter(&self) -> QueryIter<'a, ($($comp),*,)> {
-                let mut iter = QueryIter {
+            // revised 18/05/2021
+            /// Turns a Query into a QueryIter
+            /// 
+            /// SAFETY:
+            ///
+            /// THIS IS NOT SAFE TO USE. EVER.
+            /// 
+            /// SAFETY IS ONLY GUARANTEED WHEN MANAGED PROPERLY BY A `WORLD` INSTANCE
+            ///
+            /// DO NOT USE THIS FUNCTION OTHERWISE
+            unsafe fn into_iter(&self) -> QueryIter<'a, ($($comp),*,)> {
+                let mut __iter = QueryIter {
                     world: self.world,
                     ordered_components: Vec::new(),
                     min_set_index: 0usize,
@@ -208,32 +234,73 @@ macro_rules! impl_into_query_iter {
                     _phantom: ::core::marker::PhantomData, 
                 };
                 
-                let required_components = self.get_component_sets();
+                let __required_components = self.get_required_components();
                 $(
-                    for set in &required_components {
-                        if set.component_set_id() == ComponentSetId::of::<$comp>() {
-                            iter.ordered_components.push(set);
-                            self.world.mark_read_dependency::<$comp>();
+                    for __required_component in __required_components.iter() { // TODO: optimize this macro/loop to reduce query overhead
+                        let __macro_invocation_component_id = ComponentSetId::of::<$comp>();
+                        
+                        // UNSAFE POINTER DEREFERENCE. WILL BREAK THINGS IF THIS FUNCTION IS USED IMPORPERLY
+                        let __required_component_id = (**__required_component).component_set_id();
+
+                        if __required_component_id == __macro_invocation_component_id {
+
+                            // push components in the order they are expected
+                            __iter.ordered_components.push(*__required_component);
+
+                            // any component access flags the system as having a read dependency on that component
+                            self.world.mark_dependency(DependencyType::Read, __macro_invocation_component_id);
                         }
                     }
                 )*
 
-                let components = ($(iter.ordered_components.get($index).and_then(  |__set| __set.raw_set::<$comp>() )),*);
-                if let ($(Some($comp)),*) = components {
-                    iter.min_set_index = [$($comp.len()),*].iter().enumerate().min_by_key(|(_, &v)| v).expect("slice is not empty").0;
-                    match iter.min_set_index {
+                // expands into a tuple which captures all of the required components in their expected places
+                let __ordered_components = (
+                    $(
+                        __iter.ordered_components.get($index).and_then(|__set| {
+                            
+                            // UNSAFE POINTER DEREFERENCE. WILL BREAK THINGS IF THIS FUNCTION IS USED IMPORPERLY
+                            let s = unsafe { &**__set };
+                            
+                            s.raw_set::<$comp>()
+                        })
+                    ),*
+                );
+
+                // the if let here expands into a tuple of Some()'s, this is shorthand for "do we have all of the components we asked for?"
+                if let ($(Some($comp)),*) = __ordered_components {
+
+                    // figure out which component in our ordered set has the fewest elements, it's the anchor for iteration
+                    __iter.min_set_index = [$($comp.len()),*].iter().enumerate().min_by_key(|(_, &v)| v).expect("slice is not empty").0;
+                    match __iter.min_set_index {
                         $(
                             $index => {
-                                iter.maximum_iterations = (iter.ordered_components.get($index).and_then(  |__set| __set.raw_set::<$comp>() )).expect("minimum set exists").len();
+                                // match on the component set with the fewest elements and set the iterators max iterations to its length 
+                                __iter.maximum_iterations = match (__iter.ordered_components.get($index).and_then(|__set| {
+                                    
+                                    // UNSAFE POINTER DEREFERENCE. WILL BREAK THINGS IF THIS FUNCTION IS USED IMPORPERLY
+                                    let s = unsafe { &**__set };
+                                    
+                                    s.raw_set::<$comp>()
+                                })) {
+                                    Some(__min_component_set) => {
+                                        // the number of components in the component set with the fewest elements
+                                        __min_component_set.len()
+                                    },
+                                    None => {
+                                        todo!("better error handling here");
+                                    }
+                                };
                             },
                         )*
                         _ => { unreachable!() }
                     }
                 } else {
-                    fatal!("Unable to populate QueryIter with all required components: {:?}", components);
+                    todo!("don't make this a fatal error, log the error and return an empty iterator. don't want engine crashing all of the time");
+                    fatal!("Unable to populate QueryIter with all required components: {:?}", __ordered_components);
                 }
 
-                return iter;
+                // return the finished iterator
+                return __iter;
             }
         }
     };
@@ -262,7 +329,11 @@ macro_rules! impl_query_iter {
                         $(
                             $index => {
                                 unsafe {
-                                    if let Some(entity_id) = self.ordered_components[$index].raw_set_unchecked::<$comp>().get_key(self.iteration_index) {
+                                    // UNSAFE POINTER DEREFERENCE
+                                    let __component_set = &(*self.ordered_components[$index]);
+                                    
+                                    // raw_set_unchecked is unsafe
+                                    if let Some(entity_id) = __component_set.raw_set_unchecked::<$comp>().get_key(self.iteration_index) {
                                         self.iteration_index += 1;
                                         entity_id
                                     } else {
@@ -274,22 +345,15 @@ macro_rules! impl_query_iter {
                         _ => unreachable!()
                     };
 
+                    // expands into named 
                     $(
-                        let $comp: Ref<$comp> = unsafe {
-                            if let Some(component) = self.ordered_components[$index].raw_set_unchecked::<$comp>().get(entity_id) {
+                        let $comp: Ref<$comp> = {
+                            let __component = unsafe { (*self.ordered_components[$index]).raw_set_unchecked::<$comp>().get(entity_id) };
 
-
-
-
-
-                                Ref::new(component, Some(self.world)) // !!!!!!!!! TODO: Need some better mechanism for quickly setting a write dep and checking it
-                            
-                            
-                            
-                            
-                            
+                            if let Some(__component) = __component {
+                                Ref::new(__component, Some(self.world)) // !!!!!!!!! TODO: Need some better mechanism for quickly setting a write dep and checking it
                             } else {
-                                return None
+                                return None; // early return
                             }
                         };
                     )*
@@ -358,7 +422,7 @@ impl<'a, T> DerefMut for Ref<'a, T> where T: Component  {
         // uses a component mutably. This only happens once for the life of the system.
         if let Some(world) = self.world {
             debug!("marking write dependency for {:?} in system {:?}", std::any::type_name::<T>(), world.system_execution_id());
-            world.mark_write_dependency::<T>();
+            world.mark_dependency(DependencyType::Write, ComponentSetId::of::<T>());
         }
         
         unsafe {

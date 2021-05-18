@@ -1,10 +1,9 @@
 /// Collections
 
-extern crate unsafe_any;
-
 pub use unsafe_any::UnsafeAnyExt;
-use std::{fmt::Debug, panic::AssertUnwindSafe};
-use crate::debug::MemoryUse;
+use std::{fmt::Debug, marker::PhantomData, panic::AssertUnwindSafe};
+
+trait SparseSetKey: From<usize> + Clone + Copy {}
 
 const EMPTY_KEY: usize = std::usize::MAX;
 
@@ -23,54 +22,61 @@ pub(crate) trait GetMut<I> {
     fn get_mut(&mut self, idx: I) -> Option<&mut Self::Item>;
 }
 
+/// A Spar
 #[derive(Debug, Clone)]
-pub struct SparseSet<T> {
+pub struct SparseSet<T, K = usize> where K: Into<usize> + Clone + Copy {
     sparse: Vec<usize>,
     dense: Vec<usize>,
     data: Vec<T>,
+    _key: PhantomData<K>,
 }
 
-impl<T> SparseSet<T> {
-    pub fn new() -> SparseSet<T> {
+impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
+    pub fn new() -> SparseSet<T, K> {
         SparseSet {
             sparse: Vec::new(),
             dense: Vec::new(),
             data: Vec::new(),
+            _key: PhantomData,
         }
     }
     
     /// Returns true if the `SparseSet` contains an item for `key`
-    pub fn contains<K>(&self, key: K) -> bool where K: Into<usize> {
-        self.get_idx(key.into()).is_some()
+    pub fn contains(&self, key: K) -> bool {
+        self.get_idx(key).is_some()
     }
 
     /// Inserts the item with the given key, if there is already a stored item associated with the key, returns Some(stored)
     /// 
     /// Returns None if there wasn't 
-    pub fn insert_with<K>(&mut self, key: K, item: T) -> Option<T> where K: Into<usize> {
-        let key = key.into();
-
-        while key >= self.capacity() {
+    pub fn insert_with(&mut self, key: K, item: T) -> Option<T> where K: Into<usize> {
+        while key.into() >= self.capacity() {
             let result = self.reserve( core::cmp::max(1usize,self.len()));
         }
 
         if let Some(stored) = self.get_mut(key) {
             return Some(std::mem::replace(stored, item))
         } else {
-            self.sparse[key] = self.len();
-            self.dense.push(key);
+            self.sparse[key.into()] = self.len();
+            self.dense.push(key.into());
             self.data.push(item);
             return None
         }
     }
     
     /// Inserts an item into the SparseSet and returns the key in Ok(key) if successful, otherwise returns the inserted item in Err(item)
-    pub fn insert(&mut self, item: T) -> Result<usize, T> {
-        let mut key = self.sparse.len();
+    ///
+    /// NOTE:
+    /// 
+    /// Where `insert_with` requires the weaker `K: Into<usize>`, `insert` requires `K: From<usize>`, this is because `insert` generates
+    /// a new key, whereas `insert_with` uses a provided key. In this way `SparseSet` can still be used with key types that are created
+    /// in special ways by the user
+    pub fn insert(&mut self, item: T) -> Result<K, T> where K: From<usize> {
+        let mut key: K = self.sparse.len().into();
         if !self.is_empty() {
             for (idx, sparse) in self.sparse.iter().enumerate() {
                 if *sparse == EMPTY_KEY {
-                    key = idx;
+                    key = K::from(idx);
                 }
             }
         }
@@ -82,9 +88,7 @@ impl<T> SparseSet<T> {
         }
     }
     
-    pub fn remove<K>(&mut self, key: K) -> Option<T> where K: Into<usize>  {
-        let key = key.into();
-
+    pub fn remove(&mut self, key: K) -> Option<T> where K: Into<usize>  {
         if let Some(idx) = self.get_idx(key) {
             let swap = *self.dense.last().unwrap();
             let (_, item) = (self.dense.swap_remove(idx), self.data.swap_remove(idx));
@@ -94,7 +98,7 @@ impl<T> SparseSet<T> {
             }
 
             // Set the sparse item to a marker value, for quicker testing of empty spaces
-            self.sparse[key] = EMPTY_KEY;
+            self.sparse[key.into()] = EMPTY_KEY;
 
             return Some(item)
 
@@ -192,7 +196,7 @@ impl<T> SparseSet<T> {
         }
     }
 
-    pub fn kv_pairs(&self) -> KeyValueIter<T> {
+    pub fn kv_pairs(&self) -> KeyValueIter<T, K> {
         KeyValueIter {
             set: self,
             idx: 0usize,
@@ -215,15 +219,15 @@ impl<T> SparseSet<T> {
         self.data.as_mut_slice()
     }
 
-    fn private_get(&self, key: usize) -> Option<&T> {
+    fn private_get(&self, key: K) -> Option<&T> {
         if let Some(idx) = self.get_idx(key) {
             Some(&self.data[idx])
         } else {
             None
         }
     }
-
-    fn private_get_mut(&mut self, key: usize) -> Option<&mut T> {
+    
+    fn private_get_mut(&mut self, key: K) -> Option<&mut T> where K: Into<usize> {
         if let Some(idx) = self.get_idx(key) {
             Some(&mut self.data[idx])
         } else {
@@ -231,7 +235,9 @@ impl<T> SparseSet<T> {
         }
     }
 
-    fn get_idx(&self, key: usize) -> Option<usize> {
+    fn get_idx(&self, key: K) -> Option<usize> {
+        let key: usize = key.into();
+
         if key >= self.capacity() {
             return None
         } else {
@@ -247,12 +253,12 @@ impl<T> SparseSet<T> {
     }
 }
 
-pub struct KeyValueIter<'a, T> {
-    set: &'a SparseSet<T>,
+pub struct KeyValueIter<'a, T, K = usize> where K: Into<usize> + Clone + Copy {
+    set: &'a SparseSet<T, K>,
     idx: usize,
 }
 
-impl<'a, T> Iterator for KeyValueIter<'a, T> {
+impl<'a, T, K> Iterator for KeyValueIter<'a, T, K> where K: Into<usize> + Clone + Copy {
     type Item = (usize, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -262,17 +268,7 @@ impl<'a, T> Iterator for KeyValueIter<'a, T> {
     }
 }
 
-impl<T> MemoryUse for SparseSet<T> {
-    fn memory_use_estimate(&self) -> usize {
-        let mut total = std::mem::size_of_val(&self);
-        total += self.sparse.capacity() * std::mem::size_of::<usize>();
-        total += self.dense.capacity() * std::mem::size_of::<usize>();
-        total += self.data.capacity() * std::mem::size_of::<T>();
-        total
-    }
-}
-
-impl<T> IntoIterator for SparseSet<T> {
+impl<T, K> IntoIterator for SparseSet<T, K> where K: Into<usize> + Clone + Copy {
     type Item = T;
     type IntoIter = std::vec::IntoIter<T>;
 
@@ -281,7 +277,7 @@ impl<T> IntoIterator for SparseSet<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a SparseSet<T> {
+impl<'a, T, K> IntoIterator for &'a SparseSet<T, K> where K: Into<usize> + Clone + Copy {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
 
@@ -290,7 +286,7 @@ impl<'a, T> IntoIterator for &'a SparseSet<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut SparseSet<T> {
+impl<'a, T, K> IntoIterator for &'a mut SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = &'a mut T;
     type IntoIter = std::slice::IterMut<'a, T>;
 
@@ -299,17 +295,111 @@ impl<'a, T> IntoIterator for &'a mut SparseSet<T> {
     }
 }
 
-impl<T> Get<usize> for SparseSet<T> {
+// owned key
+impl<T, K> Get<K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = T;
-    fn get(&self, idx: usize) -> Option<&Self::Item> {
+    fn get(&self, idx: K) -> Option<&Self::Item> {
         self.private_get(idx)
     }
 }
 
-impl<T> GetMut<usize> for SparseSet<T> {
+impl<T, K> GetMut<K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = T;
-    fn get_mut(&mut self, idx: usize) -> Option<&mut Self::Item> {
+    fn get_mut(&mut self, idx: K) -> Option<&mut Self::Item> {
         self.private_get_mut(idx)
+    }
+}
+
+// reference to a key
+impl<T, K> Get<&K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
+    type Item = T;
+    fn get(&self, idx: &K) -> Option<&Self::Item> {
+        self.private_get(*idx)
+    }
+}
+
+impl<T, K> GetMut<&K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
+    type Item = T;
+    fn get_mut(&mut self, idx: &K) -> Option<&mut Self::Item> {
+        self.private_get_mut(*idx)
+    }
+}
+
+struct Key(u32);
+
+/// A generational set implemented over SparseSet
+/// 
+/// Each item stored in the set has a corresponding generation. Generations track the uniqueness of re-used indices
+/// 
+/// When an item is "deleted" from the set, its generation is incremented, subsequent access to the item first checks
+/// the generation to ensure we never access stale data
+struct GenerationalSparseSet<T, K = Key, G = usize, S = usize>
+where
+    K: From<(G, S)> + Into<(G, S)>,
+    G: From<usize> + Copy + PartialEq,
+    S: From<usize> + Into<usize> + Copy,
+{
+    inner: SparseSet<(G, T), S>,
+    free: Vec<S>,
+    _key: PhantomData<K>,
+}
+
+impl<T, K, G, S> GenerationalSparseSet<T, K, G, S>
+where
+    K: From<(G, S)> + Into<(G, S)>,
+    G: From<usize> + Copy + PartialEq,
+    S: From<usize> + Into<usize> + Copy,
+{
+    fn insert(item: T) -> Result<K, T> {
+        todo!("unimplemented");
+        Err(item)
+    }
+
+    fn remove(key: K) -> Result<T, ()> {
+        todo!("unimplemented");
+        Err(())
+    }
+}
+
+impl<T, K, G, S> Get<K> for GenerationalSparseSet<T, K, G, S>
+where
+    K: From<(G, S)> + Into<(G, S)>,
+    G: From<usize> + Copy + PartialEq,
+    S: From<usize> + Into<usize> + Copy,
+{
+    type Item = T;
+
+    fn get(&self, key: K) -> Option<&Self::Item> {
+        let (gen, idx) = K::into(key);
+
+        if let Some(item) = self.inner.get(idx) {
+            if item.0 == gen {
+                return Some(&item.1)
+            }
+        }
+
+        None
+    }
+}
+
+impl<T, K, G, S> GetMut<K> for GenerationalSparseSet<T, K, G, S>
+where
+    K: From<(G, S)> + Into<(G, S)>,
+    G: From<usize> + Copy + PartialEq,
+    S: From<usize> + Into<usize> + Copy,
+{
+    type Item = T;
+
+    fn get_mut(&mut self, key: K) -> Option<&mut Self::Item> {
+        let (gen, idx) = K::into(key);
+
+        if let Some(item) = self.inner.get_mut(idx) {
+            if item.0 == gen {
+                return Some(&mut item.1)
+            }
+        }
+
+        None
     }
 }
 

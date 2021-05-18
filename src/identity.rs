@@ -1,14 +1,7 @@
 /// Identity
 
 use core::panic;
-use std::{
-    cmp::Ordering,
-    hash::Hash,
-    ops::Deref,
-    cell::Cell,
-    collections::HashMap,
-    sync::{atomic::{self, AtomicU64}, RwLock, Once}
-};
+use std::{cell::Cell, cmp::Ordering, collections::HashMap, fmt::Display, hash::Hash, ops::Deref, sync::{atomic::{self, AtomicU64}, RwLock, Once}};
 
 #[cfg_attr(any(target_arch="x86_64", target_arch="aarch64"), repr(align(128)))]
 #[cfg_attr(not(any(target_arch="x86_64", target_arch="aarch64")), repr(align(64)))]
@@ -40,10 +33,8 @@ static mut LOCALEXECUTIONID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
 
 pub(crate) trait LinearId {
     fn unique() -> Self;
-    fn as_linear_raw(&self) -> u64;
+    fn as_linear_u64(&self) -> u64;
 }
-
-
 
 /// An opaque identifier used to keep track of the context of execution. This is used to uniquely identify systems,
 /// and conduct appropriate caching and filtering for query's. Modifying the contents is considered an error under all circumstances
@@ -55,7 +46,7 @@ impl LinearId for SystemExecutionId {
         SystemExecutionId(unsafe { LOCALEXECUTIONID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) as usize })
     }
 
-    fn as_linear_raw(&self) -> u64 {
+    fn as_linear_u64(&self) -> u64 {
         self.0 as u64
     }
 }
@@ -64,38 +55,15 @@ impl LinearId for SystemExecutionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityId(usize);
 
-impl LinearId for EntityId {
-    fn unique() -> EntityId {
-        EntityId(unsafe { ENTITYID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) as usize })
-    }
-
-    fn as_linear_raw(&self) -> u64 {
-        self.0 as u64
+impl Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
 impl From<usize> for EntityId {
     fn from(val: usize) -> Self {
         EntityId(val)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SystemId(usize);
-
-impl LinearId for SystemId {
-    fn unique() -> SystemId {
-        SystemId(unsafe { SYSTEMID_COUNTER.fetch_add(1, atomic::Ordering::SeqCst) } as usize)
-    }
-
-    fn as_linear_raw(&self) -> u64 {
-        self.0 as u64
-    }
-}
-
-impl From<usize> for SystemId {
-    fn from(id: usize) -> Self {
-        SystemId(id)
     }
 }
 
@@ -109,7 +77,7 @@ impl LinearId for InstanceId {
         InstanceId (unsafe { INSTANCEID_COUNTER.fetch_add(1u64, core::sync::atomic::Ordering::SeqCst) } )
     }
 
-    fn as_linear_raw(&self) -> u64 {
+    fn as_linear_u64(&self) -> u64 {
         self.0
     }
 }
@@ -175,6 +143,12 @@ impl InternalTypeId {
     }
 }
 
+impl Into<usize> for InternalTypeId {
+    fn into(self) -> usize {
+        self.0 as usize
+    }
+}
+
 impl PartialOrd for InternalTypeId {
     fn partial_cmp(&self, _: &Self) -> Option<Ordering> {
         None // no-op, must be implemented to satisfy ordering elsewhere, e.g. in query sorting, but type-ids are considered unordered
@@ -192,7 +166,7 @@ impl LinearId for InternalTypeId {
         InternalTypeId::of::<()>()
     }
 
-    fn as_linear_raw(&self) -> u64 {
+    fn as_linear_u64(&self) -> u64 {
         self.0
     }
 }
@@ -211,7 +185,7 @@ fn type_id<T>() -> InternalTypeId where T: 'static {
                 }
                 
                 assert!(!guard.is_empty());
-                assert_eq!(guard.len() - 1, iid.as_linear_raw() as usize);
+                assert_eq!(guard.len() - 1, iid.as_linear_u64() as usize);
 
             }
         } else {

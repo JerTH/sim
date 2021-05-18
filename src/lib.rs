@@ -1,5 +1,3 @@
-#![feature(type_name_of_val)]
-
 
 pub mod math;
 pub mod sim;
@@ -8,6 +6,8 @@ pub mod cli;
 pub mod constants;
 pub mod identity;
 pub mod collections;
+pub mod systems;
+pub mod components;
 
 #[macro_use]
 pub mod debug;
@@ -99,3 +99,26 @@ pub mod world;
 //
 //
 //
+
+
+// Compiler Panic May 16, 2021
+//
+// thread 'rustc' panicked at 'attempted to read from stolen value', /rustc/5c029265465301fe9cb3960ce2a5da6c99b8dcf2/compiler/rustc_data_structures/src/steal.rs:37:21
+// note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+// 
+// error: internal compiler error: unexpected panic
+// 
+// note: the compiler unexpectedly panicked. this is a bug.
+// 
+// note: we would appreciate a bug report: https://github.com/rust-lang/rust/issues/new?labels=C-bug%2C+I-ICE%2C+T-compiler&template=ice.md
+// 
+// note: rustc 1.54.0-nightly (5c0292654 2021-05-11) running on x86_64-unknown-linux-gnu
+// 
+// note: compiler flags: -C embed-bitcode=no -C debuginfo=2 -C incremental --crate-type lib
+// 
+// note: some of the compiler flags provided by cargo are hidden
+// 
+// query stack during panic:
+// #0 [unsafety_check_result] unsafety-checking `math::<impl at src/math.rs:19:1: 64:2>::zero`
+// #1 [analysis] running analysis passes on this crate
+// end of query stack

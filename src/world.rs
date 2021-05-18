@@ -1,11 +1,9 @@
 /// World
 
-use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, conflictgraph::{ConflictCmp, ConflictGraph, ConflictGraphError}, debug::*, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId, SystemId}, query::{Query}};
+use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, components::{ComponentSet, ComponentSetId}, conflictgraph::{ConflictGraph, ConflictGraphError}, debug::*, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId}, query::{Query}, systems::{DependencyType, SystemId, WorldSystemError, WorldSystem}};
 
-use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, error::Error, fmt::{Debug, Display}, usize};
+use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, error::Error, fmt::{Debug, Display}, sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard}, usize};
 
-//
-//
 //
 // TODO (April 18th)
 //
@@ -20,49 +18,39 @@ use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, error::Error, fmt::{Debug
 //
 //
 //
-
-#[derive(Debug)]
-pub enum SystemsError {
-    FailedToResolveSystemTree(ConflictGraphError),
-    FailedToAddWorldSystem(WorldSystem),
-}
-
-impl Display for SystemsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::FailedToResolveSystemTree(inner) => write!(f, "failed to resolve system tree: {}", inner),
-            Self::FailedToAddWorldSystem(system) => write!(f, "failed to add world system: {}", system),
-        }
-    }
-}
-
-impl Error for SystemsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::FailedToResolveSystemTree(inner) => Some(inner),
-            Self::FailedToAddWorldSystem(_) => None,
-        }
-    }
-}
-
-pub trait Component: Debug + Any + 'static {} 
-impl<T> Component for T where T: Debug + Any + 'static {}
+//
+//
+//
 
 #[derive(Debug, Clone)]
 pub enum WorldCommand {
+    AddComponentToEntity(ComponentSetId, EntityId),
+    RemoveComponentFromEntity(ComponentSetId, EntityId),
+    CreateEntity,
+    ResolveSystemTree,
     Stop,
-    ResolveFlowGraph,
 }
 
 /// World
+/// 
+/// A world encapsulates all objects and possible interactions between objects within it.
+/// Everything in a world is an entity, and every entity is described by a set of components.
+/// Rules governing entities are described as systems, which operate on sets of components
+/// collected by queries.
 #[derive(Debug)]
 pub struct World {
+    // Maybe worth having multiple disjoint "worlds" for entities that never interact
+    // Entities in separate worlds could then interact via messages passed between worlds
+    // Could be useful for native networking
+    // One example of disjoint worlds would be a UI and a 3D environment,
+    // or an overworld and a level
+
     entities: RefCell<Vec<EntityId>>,
-    components: RefCell<SparseSet<ComponentSet>>,
+    components: SparseSet<UnsafeCell<ComponentSet>, ComponentSetId>, // Using Mutex for now, worth revisiting later
     command_queue: RefCell<Vec<WorldCommand>>,
     
-    systems: SparseSet<WorldSystem>,
-    system_tree: Vec<Vec<SystemId>>,
+    systems: SparseSet<WorldSystem, SystemId>,
+    system_tree: RefCell<Vec<Vec<SystemId>>>,
 
     // spatial data
 }
@@ -71,81 +59,86 @@ impl World {
     pub fn new() -> Self {
         World {
             entities: RefCell::new(Vec::new()),
-            components: RefCell::new(SparseSet::new()),
+            components: SparseSet::new(),
             command_queue: RefCell::new(Vec::new()),
             systems: SparseSet::new(),
-            system_tree: Vec::new(),
+            system_tree: RefCell::new(Vec::new()),
         }
     }
 
     pub fn new_entity(&self) -> EntityId {
-        let entity_id = EntityId::unique();
-        self.entities.borrow_mut().push(entity_id);
-        entity_id
+        debug!("creating new entity");
+        todo!()
     }
 
     pub fn add_component<T: Debug + 'static>(&self, entity: EntityId, component: T) {
-        let component_set_id = ComponentSetId::of::<T>();
-        let mut components = self.components.borrow_mut();
-        if let Some(component_set) = components.get_mut(component_set_id) {
-            component_set.add_component(entity, component);
-        } else {
-            let component_set = ComponentSet::new::<T>();
-            //let component_set = ComponentSet {
-            //    ident: component_set_id,
-            //    name: String::from("UNIMPLEMENTED"),
-            //    count: 0,
-            //    set: Box::new(SparseSet::<T>::new()),
-            //};
+        //let component_set_id = ComponentSetId::of::<T>();
+        //let mut components = self.components.lock();        
+        //
+        //if let Some(component_set) = components.get_mut(component_set_id) {
+        //    component_set.add_component(entity, component);
+        //} else {
+        //    let component_set = ComponentSet::new::<T>();
+        //    //let component_set = ComponentSet {
+        //    //    ident: component_set_id,
+        //    //    name: String::from("UNIMPLEMENTED"),
+        //    //    count: 0,
+        //    //    set: Box::new(SparseSet::<T>::new()),
+        //    //};
+        //    
+        //    components.insert_with(component_set_id, component_set);
+        //    drop(components); // explicitely drop the RefMut
+        //    self.add_component(entity, component); // recursively add component to the new set
+        //}
 
-            components.insert_with(component_set_id.as_linear_raw() as usize, component_set);
-            drop(components); // explicitely drop the RefMut
-            self.add_component(entity, component); // recursively add component to the new set
-        }
+        todo!() // this should probably remain a deferred end-of-frame action using the command interface
     }
 
-    fn resolve_system_tree(&mut self) -> Result<(), SystemsError> {
+    fn resolve_system_tree(&self) -> Result<(), WorldSystemError> {
         let mut graph = ConflictGraph::new();
 
         for system in self.systems.iter() {
             match graph.insert(system) {
                 Ok(()) => {
-                    // do nothing
+                    // do nothing for now
                 },
                 Err(e) => {
-                    return Err(SystemsError::FailedToResolveSystemTree(e));
+                    return Err(WorldSystemError::FailedToResolveSystemTree(e));
                 }
             }
         }
-
-        let tree = graph.cliques(); // map error
+        
+        let tree = graph.cliques(); // map error to SystemError
 
         match tree {
             Ok(tree) => {
-                self.system_tree = tree.into_iter()
+                *self.system_tree.borrow_mut() = tree.into_iter()
                     .map(|group| group.into_iter()
-                    .map(|system| system.id)
+                    .map(|system| system.id())
                     .collect())
                     .collect();
                 return Ok(())
             },
             Err(e) => {
-                return Err(SystemsError::FailedToResolveSystemTree(e));
+                return Err(WorldSystemError::FailedToResolveSystemTree(e));
             }
         }
     }
-
+    
+    // TODO: Probably worth kicking this into its own thread as well, leverage jobs to get rid of "main" thread bottleneck
     pub fn run(&self) {
-
-        // when running systems in parallel, maybe wrap each system in a go/finished block that chains condvars based on data dependency? 
-        
-        loop {
-
-
-            for system_group in self.system_tree.iter() {
+        'main: loop {
+            for system_group in self.system_tree.borrow().iter() {
                 // in each iteration of this loop we simulataneously kick off every system of the group
                 // each group is internally conflict-free, and so each system in a group can run in parallel
 
+                // TODO: Give systems some ability to multi-thread within themselves, useful for large systems
+
+                // TODO: Give threads some housekeeping tasks when they are idle, self-tests, diagnostics,
+                //       sorting component sets, etc. Housekeeping jobs can be "posted" from other places
+                //       in the code, e.g. SortComponentRelationship(comp_a, comp_b) and whenever a thread
+                //       has time it can take the job and execute it
+                
                 for system_id in system_group {
                     let system = self.systems.get(system_id);
 
@@ -175,39 +168,50 @@ impl World {
             //        error!("Failed to get system (id: {:?}) from system set", system_id);
             //    }
             //}
-
+            
+            // TODO: Probably a good idea to limit the # of commands processed each frame and use a priorty queue of some sort
             for command in self.command_queue.borrow_mut().drain(0..) {
                 match command {
-                    WorldCommand::Stop => { debug!("WorldCommand::Stop"); return },
-                    WorldCommand::ResolveFlowGraph => {
-                        // Collect all read-only systems
-
-                        //let read_only: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| system.writes.borrow().is_empty()).collect();
-                        //let writes: Vec<&WorldSystem> = self.systems.as_slice().iter().filter(|system| !system.writes.borrow().is_empty()).collect();
-
-                        // for each system
-                        //   for each dep of that system
-                        //     for each other system
-                        //       for each dep of the other system
-                        //       
-                    }
+                    WorldCommand::AddComponentToEntity(component, entity) => {
+                        todo!()
+                    },
+                    WorldCommand::RemoveComponentFromEntity(component, entity) => {
+                        debug!("adding component to entity {}", entity);
+                        todo!()
+                    },
+                    WorldCommand::CreateEntity => {
+                        todo!()
+                        // can this work? we need to return the entities ID somehow
+                        // could reserve the ID and return it at the call-site
+                        // maybe 
+                    },
+                    WorldCommand::ResolveSystemTree => {
+                        self.resolve_system_tree();
+                    },
+                    WorldCommand::Stop => {
+                        log!("stopping world simulation");
+                        break 'main;
+                    },
                 }
             }
         }
     }
     
-    pub fn add_system(&mut self, system: WorldSystem) -> Result<usize, SystemsError> {
+    pub fn add_system(&mut self, system: WorldSystem) -> Result<SystemId, WorldSystemError> {
         match self.systems.insert(system) {
             Ok(id) => {
+                // insert succeeded
                 if let Some(system) = self.systems.get_mut(id) {
-                    system.id = SystemId::from(id);
+                    // set the systems id to whatever
+                    system.set_id(SystemId::from(id));
                 } else {
+                    // this really shouldn't happen, something bad caused this
                     fatal!("failed to get world system immediately after adding it");
                 }
                 return Ok(id)
             },
             Err(system) => {
-                return Err(SystemsError::FailedToAddWorldSystem(system))
+                return Err(WorldSystemError::FailedToAddWorldSystem(system))
             }
         }
     }
@@ -226,7 +230,7 @@ impl World {
     pub fn queue_command(&self, command: WorldCommand) {
         self.command_queue.borrow_mut().push(command);
         
-        todo!("do something better here");
+        todo!("do something better here, probably get rid of the refcell around command_queue");
     }
 
     #[allow(dead_code)]
@@ -236,195 +240,6 @@ impl World {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DependencyType {
-    Read,
-    Write,
-}
-
-pub struct WorldSystem {
-    name: String,
-    func: Box<dyn Fn(LocalWorld) -> Result<(), SystemsError>>,
-    id: SystemId,
-
-    // a local execution id, superceded by `id`
-    #[deprecated] exec_id: SystemExecutionId,
-
-    // dependencies represented as id's, only used for conflict resolution
-    reads: Vec<ComponentSetId>,
-    writes: Vec<ComponentSetId>,
-}
-
-impl WorldSystem {
-    fn run(&self, local_world: LocalWorld) -> Result<(), SystemsError> {
-        (self.func)(local_world)
-    }
-
-    fn execution_id(&self) -> SystemExecutionId {
-        self.exec_id
-    }
-
-    fn mark_dependency(&mut self, dependency: DependencyType, component_id: ComponentSetId) {
-
-    }
-
-    pub(crate) fn mark_write_dependency<T>(&mut self) where T: Component {
-        self.writes.push(ComponentSetId::of::<T>())
-    }
-
-    pub(crate) fn mark_read_dependency<T>(&mut self) where T: Component {
-        self.reads.push(ComponentSetId::of::<T>())
-    }
-}
-
-impl Display for WorldSystem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = self.name.as_str();
-        write!(f, "{}", name)
-    }
-}
-
-impl ConflictCmp for &WorldSystem {
-    fn conflict_cmp(&self, other: &Self) -> bool {
-        // conflict if two systems write the same data or one node reads and the other node writes
-
-        for read in self.reads.iter() {
-            for write in other.writes.iter() {
-                if read == write {
-                    return true
-                }
-            }
-        }
-        
-        for write in self.writes.iter() {
-            for read in other.reads.iter() {
-                if write == read {
-                    return true
-                }
-            }
-            
-            for other_write in other.writes.iter() {
-                if write == other_write {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-}
-
-impl Get<SystemId> for SparseSet<WorldSystem> {
-    type Item = WorldSystem;
-    fn get(&self, idx: SystemId) -> Option<&Self::Item> {
-        self.get(idx.as_linear_raw() as usize)
-    }
-}
-
-impl GetMut<SystemId> for SparseSet<WorldSystem> {
-    type Item = WorldSystem;
-    fn get_mut(&mut self, idx: SystemId) -> Option<&mut Self::Item> {
-        self.get_mut(idx.as_linear_raw() as usize)
-    }
-}
-
-impl Get<&SystemId> for SparseSet<WorldSystem> {
-    type Item = WorldSystem;
-    fn get(&self, idx: &SystemId) -> Option<&Self::Item> {
-        self.get(idx.as_linear_raw() as usize)
-    }
-}
-
-impl GetMut<&SystemId> for SparseSet<WorldSystem> {
-    type Item = WorldSystem;
-    fn get_mut(&mut self, idx: &SystemId) -> Option<&mut Self::Item> {
-        self.get_mut(idx.as_linear_raw() as usize)
-    }
-}
-
-impl Get<ComponentSetId> for SparseSet<ComponentSet> {
-    type Item = ComponentSet;
-    fn get(&self, idx: ComponentSetId) -> Option<&Self::Item> {
-        self.get(idx.as_linear_raw() as usize)
-    }
-}
-
-impl GetMut<ComponentSetId> for SparseSet<ComponentSet> {
-    type Item = ComponentSet;
-    fn get_mut(&mut self, idx: ComponentSetId) -> Option<&mut Self::Item> {
-        self.get_mut(idx.as_linear_raw() as usize)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComponentSetId(InternalTypeId);
-
-impl ComponentSetId {
-    pub(crate) fn of<T>() -> Self where T: 'static {
-        ComponentSetId(InternalTypeId::of::<SparseSet<T>>())
-    }
-}
-
-impl LinearId for ComponentSetId {
-    fn unique() -> Self {
-        ComponentSetId(InternalTypeId::unique())
-    }
-
-    fn as_linear_raw(&self) -> u64 {
-        self.0.as_linear_raw()
-    }
-}
-
-type RawComponentSet<T> = SparseSet<UnsafeCell<T>>;
-
-#[derive(Debug)]
-pub struct ComponentSet {
-    ident: ComponentSetId,
-    count: usize,
-    name: String,
-    set: Box<dyn Any>,
-}
-
-impl ComponentSet {
-    fn new<T: Debug>() -> Self where T: 'static {
-        ComponentSet {
-            ident: ComponentSetId::of::<T>(),
-            count: 0,
-            name: String::from(core::any::type_name::<T>()),
-            set: Box::new(RawComponentSet::<T>::new()),
-        }
-    }
-    
-    fn add_component<T: Component>(&mut self, entity: EntityId, component: T) {
-        if self.set.is::<RawComponentSet<T>>() {
-            if let Some(set) = self.set.downcast_mut::<RawComponentSet<T>>() {
-                let result = set.insert_with(entity.as_linear_raw() as usize, UnsafeCell::new(component));
-                
-                assert!(result.is_none());
-                self.count += 1;
-            } else {
-                panic!("ComponentSet::set downcast failed");
-            }
-        } else {
-            panic!("ComponentSet::set is not SparseSet<T>");
-        }
-    }
-
-    pub fn contains<T>(&self) -> bool where T: 'static {
-        self.ident == ComponentSetId::of::<T>()
-    }
-
-    pub(crate) fn component_set_id(&self) -> ComponentSetId {
-        self.ident
-    }
-    
-    pub(crate) fn raw_set<T: 'static>(&self) -> Option<&RawComponentSet<T>> {
-        self.set.downcast_ref::<RawComponentSet<T>>()
-    }
-
-    pub(crate) unsafe fn raw_set_unchecked<T: 'static>(&self) -> &RawComponentSet<T> {
-        self.set.downcast_ref_unchecked::<RawComponentSet<T>>()
-    }
-}
 
 pub struct EntityIdIter<'a> {
     entities: &'a RefCell<Vec<EntityId>>,
@@ -467,10 +282,17 @@ impl<'a> LocalWorld<'a> {
             idx: 0
         }
     }
-
-    pub fn component_set_from_id(&self, id: ComponentSetId) -> Option<&ComponentSet> {
-        let set = self.world.components.as_ptr();
-        unsafe { (*set).get(id) } // TODO: This is not good, clean this up when adding concurrency
+    
+    pub(crate) unsafe fn get_component_set(&self, component_set_id: ComponentSetId) -> Option<*mut ComponentSet> {
+        match self.world.components.get(component_set_id) {
+            Some(cell) => {
+                return Some(cell.get());
+            },
+            None => {
+                debug!("couldn't get component set {} from sparse set while attempting to lock it", component_set_id);
+                return None;
+            }
+        }
     }
 
     pub(crate) fn system_execution_id(&self) -> SystemExecutionId {
@@ -485,41 +307,28 @@ impl<'a> LocalWorld<'a> {
         self.world.mark_dependency(dependency, self.system_id, component_id);
     }
     
-    #[deprecated]
-    pub(crate) fn mark_read_dependency<T: Component>(&self) {
-        if let Some(system) = self.world.systems.as_slice().iter().find(|system| {
-            system.execution_id() == self.system_execution_id()
-        }) {
-            //system.mark_read_dependency::<T>(); // TODO: HANDLE THIS WITH SOMETHING BETTER THAN REFCELL
-        } else {
-            fatal!("unable to find system data while attempting to mark read dependency");
-        }
-    }
-
-    #[deprecated]
-    pub(crate) fn mark_write_dependency<T: Component>(&self) {
-        if let Some(system) = self.world.systems.as_slice().iter().find(|system| {
-            system.execution_id() == self.system_execution_id()
-        }) {
-            //system.mark_write_dependency::<T>();
-        } else {
-            fatal!("unable to find system data while attempting to mark write dependency");
-        }
-    }
-
-    #[allow(dead_code)]
-    #[cfg(test)]
-    pub(crate) fn test_dummy(world: &'a World) -> Self {
-        LocalWorld {
-            system_id: SystemId::unique(),
-            world: world,
-            execution_id: Cell::new(SystemExecutionId::unique()),
-        }
-    }
+    //#[deprecated]
+    //pub(crate) fn mark_read_dependency<T: Component>(&self) {
+    //    if let Some(system) = self.world.systems.as_slice().iter().find(|system| {
+    //        system.execution_id() == self.system_execution_id()
+    //    }) {
+    //        //system.mark_read_dependency::<T>(); // TODO: HANDLE THIS WITH SOMETHING BETTER THAN REFCELL
+    //    } else {
+    //        fatal!("unable to find system data while attempting to mark read dependency");
+    //    }
+    //}
+    
+    //#[deprecated]
+    //pub(crate) fn mark_write_dependency<T: Component>(&self) {
+    //    if let Some(system) = self.world.systems.as_slice().iter().find(|system| {
+    //        system.execution_id() == self.system_execution_id()
+    //    }) {
+    //        //system.mark_write_dependency::<T>();
+    //    } else {
+    //        fatal!("unable to find system data while attempting to mark write dependency");
+    //    }
+    //}
 }
-
-
-
 
 pub trait IntoCoordinate {
     fn as_coordinate(&self) -> (f64, f64, f64);
@@ -531,27 +340,16 @@ impl IntoCoordinate for (f64, f64, f64) {
     }
 }
 
-
-
-// Debug implementations
-
-impl core::fmt::Debug for WorldSystem {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("WorldSystem")
-        .field("func", &"dyn Fn(&LocalWorld) -> SystemResult")
-        .field("reads", &self.reads)
-        .field("writes", &self.writes)
-        .field("name", &self.name)
-        .finish()
-    }
+#[allow(unused_macros)]
+macro_rules! query_results {
+    ($query:expr, ($($comp:ident),*)) => {
+        unsafe { IntoQueryIter::<($($comp),*)>::into_iter(&$query) }
+    };
 }
-
 
 
 #[cfg(test)]
 mod tests {
-    use std::alloc::System;
-
     use super::*;
     use crate::query::IntoQueryIter;
 
@@ -559,12 +357,12 @@ mod tests {
     fn hello_world() {
         let mut world = World::new();
 
-        fn hello_system(_: LocalWorld) -> Result<(), SystemsError> {
+        fn hello_system(_: LocalWorld) -> Result<(), WorldSystemError> {
             debug!("Hello from hello_system!");
             Ok(())
         }
 
-        fn goodbye_system(local_world: LocalWorld) -> Result<(), SystemsError> {
+        fn goodbye_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
             debug!("Goodbye from goodbye_system!");
             local_world.queue_command(WorldCommand::Stop);
             Ok(())
@@ -579,7 +377,7 @@ mod tests {
     fn add_components() {
         let mut world = World::new();
 
-        fn entity_producer_system(local_world: LocalWorld) -> Result<(), SystemsError> {
+        fn entity_producer_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
             for _ in 0..10 {
                 let entity = local_world.new_entity();
                 let component = 0usize;
@@ -588,7 +386,7 @@ mod tests {
             Ok(())
         }
 
-        fn float_producer_system(local_world: LocalWorld) -> Result<(), SystemsError> {
+        fn float_producer_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
             for entity in local_world.entities() {
                 let component = 0f32;
                 local_world.add_component(entity, component);
@@ -607,7 +405,7 @@ mod tests {
         log!("");
         let mut world = World::new();
 
-        fn entity_producer_system(local_world: LocalWorld) -> Result<(), SystemsError> {
+        fn entity_producer_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
             debug!("Running entity producer system");
 
             for i in 0..10 {
@@ -628,7 +426,7 @@ mod tests {
             Ok(())
         }
         
-        fn component_query_system(local_world: LocalWorld) -> Result<(), SystemsError> {
+        fn component_query_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
             debug!("Running component query system");
 
             for _ in 0..1 {
@@ -638,7 +436,7 @@ mod tests {
                     .with::<bool>()
                     .make(&local_world);
 
-                for (f, mut b) in IntoQueryIter::<(i32, bool)>::into_iter(&query) {
+                for (f, mut b) in query_results!(query, (f32, bool)) {
                     debug!("Got components: {:?}", (*f, *b));
                     *b = !*b;
                 }
@@ -704,7 +502,7 @@ mod tests {
             .sort_filters();
 
         let world = LocalWorld{
-            system_id: SystemId::unique(),
+            system_id: SystemId::from(0),
             world: &dummy_world(),
             execution_id: Cell::new(SystemExecutionId::unique()),
         };

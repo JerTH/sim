@@ -88,6 +88,7 @@ impl<N: ConflictCmp> ConflictGraph<N> {
     pub fn cliques(mut self) -> Result<Vec<Vec<N>>, ConflictGraphError> {
         self.rebuild()?;
         self.color()?;
+        self.check()?;
         self.into()
     }
 
@@ -115,7 +116,12 @@ impl<N: ConflictCmp> ConflictGraph<N> {
     }
     
     fn color(&mut self) -> Result<(), ConflictGraphError> {
-        let mut used_colors: Vec<usize> = vec![];
+        // colors the graph using a pretty simple brute force approach. This allocates a lot, and isn't
+        // particularly efficient. Suitable for small graphs that are created infrequently, but will break
+        // down in performance quickly with large graphs. Maybe worth improving in the future if
+        // it becomes a problem or finds use elsewhere
+
+        let mut used_colors: Vec<usize> = Vec::with_capacity(8);
 
         // quick and dirty helper struct, only used in this function for clarities sake
         #[derive(Default, PartialEq, Eq)]
@@ -189,7 +195,7 @@ impl<N: ConflictCmp> ConflictGraph<N> {
                     }
                 }
             }
-
+            
             // choose the "smallest" color for the candidate, excluding its neighbors colors
             'outer: loop {
                 for color in used_colors.iter() {
@@ -212,15 +218,13 @@ impl<N: ConflictCmp> ConflictGraph<N> {
             }
         }
 
-        self.check()?;
-
-        log_context!(("graph"){
+        log_context!(("conflict graph"){
             debug!("conflict graph of {} nodes colored in {:?} passes, used {:?} colors", self.nodes.len(), passes, used_colors.len());
         });
 
         Ok(())
     }
-
+    
     #[allow(dead_code)]
     fn check(&self) -> Result<(), ConflictGraphError> {
         for node in self.nodes.iter().enumerate() {
