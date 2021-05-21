@@ -47,13 +47,15 @@ pub enum DependencyType {
     Write,
 }
 
+pub type WorldSystemFn = fn(LocalWorld) -> Result<(), WorldSystemError>;
+pub trait WorldSystemFnTrait: Fn(LocalWorld) -> Result<(), WorldSystemError> {}
+
 pub struct WorldSystem {
     name: String,
-    func: Box<dyn Fn(LocalWorld) -> Result<(), WorldSystemError>>,
     id: SystemId,
 
-    // a local execution id, superceded by `id`
-    #[deprecated] exec_id: SystemExecutionId,
+    // the system code executed every engine loop
+    system_fn: WorldSystemFn,
 
     // dependencies represented as id's, only used for conflict resolution
     reads: Vec<ComponentSetId>,
@@ -61,13 +63,18 @@ pub struct WorldSystem {
 }
 
 impl WorldSystem {
-    fn run(&self, local_world: LocalWorld) -> Result<(), WorldSystemError> {
-        (self.func)(local_world)
+    pub(crate) fn new(system_fn: WorldSystemFn) -> Self {
+        WorldSystem {
+            name: String::from(""),
+            id: SystemId::from(0),
+            system_fn: system_fn,
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
     }
 
-    #[deprecated]
-    fn execution_id(&self) -> SystemExecutionId {
-        self.exec_id
+    pub(crate) fn run(&self, local_world: LocalWorld) -> Result<(), WorldSystemError> {
+        (self.system_fn)(local_world)
     }
 
     pub(crate) fn id(&self) -> SystemId {
@@ -77,30 +84,9 @@ impl WorldSystem {
     pub(crate) fn set_id(&mut self, id: SystemId) {
         self.id = id;
     }
-
-    // /fn mark_dependency(&mut self, dependency: DependencyType, component_id: ComponentSetId) {
-    // /    todo!()
-    // /}
-
-    #[deprecated]
-    pub(crate) fn mark_write_dependency<T>(&mut self) where T: Component {
-        self.writes.push(ComponentSetId::of::<T>())
-    }
-
-    #[deprecated]
-    pub(crate) fn mark_read_dependency<T>(&mut self) where T: Component {
-        self.reads.push(ComponentSetId::of::<T>())
-    }
 }
 
-impl Display for WorldSystem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = self.name.as_str();
-        write!(f, "{}", name)
-    }
-}
-
-impl ConflictCmp for &WorldSystem {
+impl<'a> ConflictCmp for &WorldSystem {
     fn conflict_cmp(&self, other: &Self) -> bool {
         // conflict if two systems write the same data or one node reads and the other node writes
 
@@ -129,7 +115,7 @@ impl ConflictCmp for &WorldSystem {
     }
 }
 
-impl Debug for WorldSystem {
+impl<'a> Debug for WorldSystem {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WorldSystem")
         .field("func", &"dyn Fn(&LocalWorld) -> SystemResult")
@@ -139,6 +125,57 @@ impl Debug for WorldSystem {
         .finish()
     }
 }
+
+impl<'a> Display for WorldSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = self.name.as_str();
+        write!(f, "{}", name)
+    }
+}
+
+
+/// A group of systems and their dependencies
+#[derive(Debug, Default)]
+pub(crate) struct SystemGroup {
+    systems: Vec<SystemId>,
+    group_mutable: Vec<ComponentSetId>,
+    group_immutable: Vec<ComponentSetId>,
+}
+
+impl SystemGroup {
+    pub fn system_ids(&self) -> &Vec<SystemId> {
+        &self.systems
+    }
+
+    pub fn group_immutable(&self) -> &Vec<ComponentSetId> {
+        &self.group_immutable
+    }
+
+    pub fn group_mutable(&self) -> &Vec<ComponentSetId> {
+        &self.group_mutable
+    }
+}
+
+impl From<Vec<&WorldSystem>> for SystemGroup {
+    fn from(systems: Vec<&WorldSystem>) -> Self {
+        let mut group = SystemGroup::default();
+
+        for system in systems {
+            group.systems.push(system.id());
+            group.group_immutable.extend(&system.reads);
+            group.group_mutable.extend(&system.writes);
+        }
+
+        group.group_immutable.sort();
+        group.group_immutable.dedup();
+        
+        group.group_mutable.sort();
+        group.group_mutable.dedup();
+
+        return group;
+    }
+}
+
 
 //impl Get<SystemId> for SparseSet<WorldSystem> {
 //    type Item = WorldSystem;

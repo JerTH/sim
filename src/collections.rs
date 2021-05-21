@@ -22,9 +22,16 @@ pub(crate) trait GetMut<I> {
     fn get_mut(&mut self, idx: I) -> Option<&mut Self::Item>;
 }
 
-/// A Spar
+/// SparseSet
 #[derive(Debug, Clone)]
 pub struct SparseSet<T, K = usize> where K: Into<usize> + Clone + Copy {
+    // TODO: - Large key optimization. Currently, if the user inserts with a large key, memory is allocated
+    //         proportional to the key size. This makes SparseSet great for keys in the range close to 0, but
+    //         very bad for random keys, or keys that are much larger than 0, it's very easy to trigger an out
+    //         of memory condition by accident if one inserts with a random key. To fix this, large keys should be
+    //         handled as a special case. They won't enjoy the same benefits as small keys that make SparseSet
+    //         valuable, but fix this will insulate against mis-use and improve soundness
+
     sparse: Vec<usize>,
     dense: Vec<usize>,
     data: Vec<T>,
@@ -40,18 +47,32 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
             _key: PhantomData,
         }
     }
-    
-    /// Returns true if the `SparseSet` contains an item for `key`
-    pub fn contains(&self, key: K) -> bool {
-        self.get_idx(key).is_some()
-    }
 
+    /// Inserts an item into the SparseSet and returns the key in Ok(key) if successful, otherwise returns the inserted item in Err(item)
+    ///
+    /// NOTE:
+    /// 
+    /// Where `insert_with` requires the weaker `K: Into<usize>`, `insert` requires `K: From<usize>`, this is because `insert` generates
+    /// a new key, whereas `insert_with` uses a provided key. In this way `SparseSet` can still be used with key types that are created
+    /// in special ways by the user
+    pub fn insert(&mut self, item: T) -> K where K: From<usize> {        
+        let key: K = self.next_key();
+
+        match self.insert_with(key, item) {
+            Some(_) => {
+                panic!("SparseSet::insert expected an empty index"); // it's a bug if we get an item back here
+            },
+            _ => ()
+        }
+        return key;
+    }
+    
     /// Inserts the item with the given key, if there is already a stored item associated with the key, returns Some(stored)
     /// 
     /// Returns None if there wasn't 
     pub fn insert_with(&mut self, key: K, item: T) -> Option<T> where K: Into<usize> {
         while key.into() >= self.capacity() {
-            let result = self.reserve( core::cmp::max(1usize,self.len()));
+            let _result = self.reserve( core::cmp::max(1usize,self.len()));
         }
 
         if let Some(stored) = self.get_mut(key) {
@@ -61,30 +82,6 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
             self.dense.push(key.into());
             self.data.push(item);
             return None
-        }
-    }
-    
-    /// Inserts an item into the SparseSet and returns the key in Ok(key) if successful, otherwise returns the inserted item in Err(item)
-    ///
-    /// NOTE:
-    /// 
-    /// Where `insert_with` requires the weaker `K: Into<usize>`, `insert` requires `K: From<usize>`, this is because `insert` generates
-    /// a new key, whereas `insert_with` uses a provided key. In this way `SparseSet` can still be used with key types that are created
-    /// in special ways by the user
-    pub fn insert(&mut self, item: T) -> Result<K, T> where K: From<usize> {
-        let mut key: K = self.sparse.len().into();
-        if !self.is_empty() {
-            for (idx, sparse) in self.sparse.iter().enumerate() {
-                if *sparse == EMPTY_KEY {
-                    key = K::from(idx);
-                }
-            }
-        }
-
-        if let Some(item) = self.insert_with(key, item) {
-            return Err(item);
-        } else {
-            return Ok(key);
         }
     }
     
@@ -106,6 +103,27 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
             return None
         }
     }
+
+    /// Returns the next free key that would be used by `insert`
+    /// 
+    /// Useful in conjunction with `insert_with`
+    pub fn next_key(&self) -> K where K: From<usize>  {
+        if self.is_empty() {
+            return self.sparse.len().into(); // this is the first and only key
+        } else {
+            for (idx, sparse) in self.sparse.iter().enumerate() {
+                if *sparse == EMPTY_KEY {
+                    return K::from(idx);
+                }
+            }
+            return self.sparse.len().into(); // no unused keys
+        }
+    }
+
+    /// Returns true if the `SparseSet` contains an item for `key`
+    pub fn contains(&self, key: K) -> bool {
+        self.get_idx(key).is_some()
+    }
     
     /// Reserves space for `additional` elements in the SparseSet
     /// 
@@ -114,10 +132,11 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
     /// # Exception Safety
     /// 
     /// This method makes a best-effort attempt to be exception safe, internally it uses Vec::resize
-    /// and Vec::reserve, which can potentially panic, this is wrapped in a check and a catch_unwind.
+    /// and Vec::reserve, which can potentially panic, this is wrapped in a check and a catch_unwind
+    /// and instead an error is returned.
     /// 
     /// Despite this best-effort it is still possible for panic-aborts to be triggered inside the
-    /// standard library, these cannot be caught, and will still result in program termination
+    /// standard library, these cannot be caught, and will still result in program termination.
     pub fn reserve(&mut self, additional: usize) -> Result<usize, TryReserveError> {
         let new_capacity = additional + self.capacity();
 
@@ -178,13 +197,10 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
     /// Safety:
     /// 
     /// SparseSet is unordered. Internally, items are free to move around, thus it's not generally useful to
-    /// associate a raw index with a key/value pair. This function is declared unsafe to mitigate foot-gun usage.
-    /// That said, this is still useful sometimes especially when iterating the contents of the SparseSet
+    /// associate a the raw index with passed into this function with a key/value pair. This function is declared
+    /// unsafe to mitigate foot-gun usage. With that said, when used with care this is still sometimes useful
+    /// especially when iterating over the contents of the SparseSet
     pub unsafe fn get_kv_pair(&self, idx: usize) -> Option<(usize, &T)> {
-        // TODO: Revisit this, having an interface to directly get k/v pairs from internal indices isn't ideal
-        //
-        // Maybe use an iterator that returns k/v's? Investigate if this is even necessary at all
-        //
 
         let key = self.dense.get(idx);
         let val = self.data.get(idx);
@@ -219,7 +235,7 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
         self.data.as_mut_slice()
     }
 
-    fn private_get(&self, key: K) -> Option<&T> {
+    fn _private_get(&self, key: K) -> Option<&T> {
         if let Some(idx) = self.get_idx(key) {
             Some(&self.data[idx])
         } else {
@@ -227,7 +243,7 @@ impl<T, K> SparseSet<T, K> where K: Into<usize> + Clone + Copy {
         }
     }
     
-    fn private_get_mut(&mut self, key: K) -> Option<&mut T> where K: Into<usize> {
+    fn _private_get_mut(&mut self, key: K) -> Option<&mut T> where K: Into<usize> {
         if let Some(idx) = self.get_idx(key) {
             Some(&mut self.data[idx])
         } else {
@@ -299,14 +315,14 @@ impl<'a, T, K> IntoIterator for &'a mut SparseSet<T, K> where K: Into<usize> + C
 impl<T, K> Get<K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = T;
     fn get(&self, idx: K) -> Option<&Self::Item> {
-        self.private_get(idx)
+        self._private_get(idx)
     }
 }
 
 impl<T, K> GetMut<K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = T;
     fn get_mut(&mut self, idx: K) -> Option<&mut Self::Item> {
-        self.private_get_mut(idx)
+        self._private_get_mut(idx)
     }
 }
 
@@ -314,14 +330,14 @@ impl<T, K> GetMut<K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
 impl<T, K> Get<&K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = T;
     fn get(&self, idx: &K) -> Option<&Self::Item> {
-        self.private_get(*idx)
+        self._private_get(*idx)
     }
 }
 
 impl<T, K> GetMut<&K> for SparseSet<T, K> where K: Into<usize> + Clone + Copy{
     type Item = T;
     fn get_mut(&mut self, idx: &K) -> Option<&mut Self::Item> {
-        self.private_get_mut(*idx)
+        self._private_get_mut(*idx)
     }
 }
 
@@ -339,8 +355,8 @@ where
     G: From<usize> + Copy + PartialEq,
     S: From<usize> + Into<usize> + Copy,
 {
-    inner: SparseSet<(G, T), S>,
     free: Vec<S>,
+    inner: SparseSet<(G, T), S>,
     _key: PhantomData<K>,
 }
 
@@ -351,12 +367,14 @@ where
     S: From<usize> + Into<usize> + Copy,
 {
     fn insert(item: T) -> Result<K, T> {
-        todo!("unimplemented");
+        Err(item)
+    }
+
+    fn insert_with(key: K, item: T) -> Result<(), T> {
         Err(item)
     }
 
     fn remove(key: K) -> Result<T, ()> {
-        todo!("unimplemented");
         Err(())
     }
 }

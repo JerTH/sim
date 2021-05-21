@@ -1,5 +1,7 @@
 /// Identity
 
+// TODO: - Provide some mechanism to associate InternalTypeId's with a string name for debug and logging purposes
+
 use core::panic;
 use std::{cell::Cell, cmp::Ordering, collections::HashMap, fmt::Display, hash::Hash, ops::Deref, sync::{atomic::{self, AtomicU64}, RwLock, Once}};
 
@@ -27,8 +29,6 @@ static TYPEID_INIT_ONCE: Once = Once::new();
 static mut TYPEID_MAP: TypeIdMapRwLock = TypeIdMapRwLock::new();
 static mut TYPEID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
 static mut INSTANCEID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
-static mut ENTITYID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
-static mut SYSTEMID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
 static mut LOCALEXECUTIONID_COUNTER: PaddedAtomicU64 = PaddedAtomicU64::new(0);
 
 pub(crate) trait LinearId {
@@ -51,21 +51,6 @@ impl LinearId for SystemExecutionId {
     }
 }
 
-/// An opaque identifier for any given entity in the world. Corresponds to exactly one entity, alive or dead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EntityId(usize);
-
-impl Display for EntityId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<usize> for EntityId {
-    fn from(val: usize) -> Self {
-        EntityId(val)
-    }
-}
 
 /// Uniquely identifying opaque ID which can be used to differentiate instances of otherwise identical structures,
 /// or uniquely group a set of instances with an identifier

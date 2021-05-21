@@ -1,8 +1,8 @@
 /// World
 
-use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, components::{ComponentSet, ComponentSetId}, conflictgraph::{ConflictGraph, ConflictGraphError}, debug::*, identity::{EntityId, InternalTypeId, LinearId, SystemExecutionId}, query::{Query}, systems::{DependencyType, SystemId, WorldSystemError, WorldSystem}};
+use crate::{collections::{UnsafeAnyExt, Get, GetMut, SparseSet}, components::{ComponentSet, ComponentSetId}, conflictgraph::{ConflictGraph, ConflictGraphError}, debug::*, identity::{InternalTypeId, LinearId, SystemExecutionId}, query::{Query}, systems::{DependencyType, SystemGroup, SystemId, WorldSystem, WorldSystemError, WorldSystemFn}};
 
-use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, error::Error, fmt::{Debug, Display}, sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard}, usize};
+use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, error::Error, fmt::{Debug, Display}, sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard}, usize};
 
 //
 // TODO (April 18th)
@@ -21,6 +21,7 @@ use std::{any::Any, cell::{Cell, RefCell, UnsafeCell}, error::Error, fmt::{Debug
 //
 //
 //
+
 
 #[derive(Debug, Clone)]
 pub enum WorldCommand {
@@ -44,13 +45,13 @@ pub struct World {
     // Could be useful for native networking
     // One example of disjoint worlds would be a UI and a 3D environment,
     // or an overworld and a level
-
-    entities: RefCell<Vec<EntityId>>,
+    
+    entities: RwLock<SparseSet<EntityId>>, // A list of all generated entity id's, indexed by the stored entity id, used to compare generations
     components: SparseSet<UnsafeCell<ComponentSet>, ComponentSetId>, // Using Mutex for now, worth revisiting later
     command_queue: RefCell<Vec<WorldCommand>>,
     
     systems: SparseSet<WorldSystem, SystemId>,
-    system_tree: RefCell<Vec<Vec<SystemId>>>,
+    system_tree: RefCell<Vec<SystemGroup>>,
 
     // spatial data
 }
@@ -58,20 +59,49 @@ pub struct World {
 impl World {
     pub fn new() -> Self {
         World {
-            entities: RefCell::new(Vec::new()),
+            entities: RwLock::new(SparseSet::new()),
             components: SparseSet::new(),
             command_queue: RefCell::new(Vec::new()),
             systems: SparseSet::new(),
             system_tree: RefCell::new(Vec::new()),
         }
     }
-
-    pub fn new_entity(&self) -> EntityId {
+    
+    /// Creates an empty entity and returns its EntityId
+    ///
+    /// The world is solely responsible for producing EntityId's
+    fn create_entity(&self) -> EntityId {
         debug!("creating new entity");
-        todo!()
+
+        match self.entities.write() {
+            Ok(mut guard) => {
+                let key = guard.next_key();
+                let mut gen = 0usize;
+
+                if let Some(previous) = guard.get(key) {
+                    gen = previous.generation() + 1;
+                }
+                
+                let id = EntityId::new(key, gen);
+                let _ = guard.insert_with(key, id); // already handled the previous item
+
+                return id;
+            },
+            Err(e) => {
+                fatal!("encountered poisoned rwlock while attempting to create a new entity: {}", e);
+            },
+        }
     }
 
-    pub fn add_component<T: Debug + 'static>(&self, entity: EntityId, component: T) {
+    /// Destroys an entity, removing all of its components from the world
+    fn destroy_entity(&self, id: EntityId) -> Result<(), ()> {
+        // When an entity is destroyed, re-use its index, and increment its generation
+        // on each component
+
+        Err(())
+    }
+
+    fn add_component<T: Debug + 'static>(&self, entity: EntityId, component: T) {
         //let component_set_id = ComponentSetId::of::<T>();
         //let mut components = self.components.lock();        
         //
@@ -93,40 +123,11 @@ impl World {
 
         todo!() // this should probably remain a deferred end-of-frame action using the command interface
     }
-
-    fn resolve_system_tree(&self) -> Result<(), WorldSystemError> {
-        let mut graph = ConflictGraph::new();
-
-        for system in self.systems.iter() {
-            match graph.insert(system) {
-                Ok(()) => {
-                    // do nothing for now
-                },
-                Err(e) => {
-                    return Err(WorldSystemError::FailedToResolveSystemTree(e));
-                }
-            }
-        }
-        
-        let tree = graph.cliques(); // map error to SystemError
-
-        match tree {
-            Ok(tree) => {
-                *self.system_tree.borrow_mut() = tree.into_iter()
-                    .map(|group| group.into_iter()
-                    .map(|system| system.id())
-                    .collect())
-                    .collect();
-                return Ok(())
-            },
-            Err(e) => {
-                return Err(WorldSystemError::FailedToResolveSystemTree(e));
-            }
-        }
-    }
     
     // TODO: Probably worth kicking this into its own thread as well, leverage jobs to get rid of "main" thread bottleneck
     pub fn run(&self) {
+        let _ = self.resolve_system_tree();
+
         'main: loop {
             for system_group in self.system_tree.borrow().iter() {
                 // in each iteration of this loop we simulataneously kick off every system of the group
@@ -139,12 +140,18 @@ impl World {
                 //       in the code, e.g. SortComponentRelationship(comp_a, comp_b) and whenever a thread
                 //       has time it can take the job and execute it
                 
-                for system_id in system_group {
+                for system_id in system_group.system_ids() {
                     let system = self.systems.get(system_id);
 
                     match system {
                         Some(system) => {
-                            // queue the system for a thread to pick up
+                            // TODO: queue the system for a thread to pick up
+                            let local_world = LocalWorld {
+                                world: &self,
+                                system_id: system.id(),
+                            };
+
+                            let _ = system.run(local_world);
                         },
                         None => {
                             error!("system doesn't exist, system_id={:?}", system_id);
@@ -172,10 +179,10 @@ impl World {
             // TODO: Probably a good idea to limit the # of commands processed each frame and use a priorty queue of some sort
             for command in self.command_queue.borrow_mut().drain(0..) {
                 match command {
-                    WorldCommand::AddComponentToEntity(component, entity) => {
+                    WorldCommand::AddComponentToEntity(_component, _entity) => {
                         todo!()
                     },
-                    WorldCommand::RemoveComponentFromEntity(component, entity) => {
+                    WorldCommand::RemoveComponentFromEntity(_component, entity) => {
                         debug!("adding component to entity {}", entity);
                         todo!()
                     },
@@ -186,10 +193,18 @@ impl World {
                         // maybe 
                     },
                     WorldCommand::ResolveSystemTree => {
-                        self.resolve_system_tree();
+                        match self.resolve_system_tree() {
+                            Err(e) => {
+                                error!("failed to resolve system tree: {}", e);
+                            },
+                            _ => (),
+                        }
                     },
                     WorldCommand::Stop => {
                         log!("stopping world simulation");
+
+                        // hack for now, when threads are added we need to properly notify each thread
+                        ::std::thread::sleep(::std::time::Duration::from_millis(100));
                         break 'main;
                     },
                 }
@@ -197,40 +212,74 @@ impl World {
         }
     }
     
-    pub fn add_system(&mut self, system: WorldSystem) -> Result<SystemId, WorldSystemError> {
-        match self.systems.insert(system) {
-            Ok(id) => {
-                // insert succeeded
-                if let Some(system) = self.systems.get_mut(id) {
-                    // set the systems id to whatever
-                    system.set_id(SystemId::from(id));
-                } else {
-                    // this really shouldn't happen, something bad caused this
-                    fatal!("failed to get world system immediately after adding it");
-                }
-                return Ok(id)
+    pub fn add_system(&mut self, system_fn: WorldSystemFn) -> Result<SystemId, WorldSystemError> {
+        let system = WorldSystem::new(system_fn);
+        let id = self.systems.insert(system);
+        self.systems.get_mut(id).expect("expected just-added system").set_id(SystemId::from(id));
+        return Ok(id)
+    }
+
+    fn resolve_system_tree(&self) -> Result<(), WorldSystemError> {
+        let mut graph = ConflictGraph::new();
+
+        for system in self.systems.iter() {
+            match graph.insert(system) {
+                Err(e) => {
+                    return Err(WorldSystemError::FailedToResolveSystemTree(e));
+                },
+                _ => (),
+            }
+        }
+        
+        let tree = graph.cliques(); // map error to SystemError
+
+        match tree {
+            Ok(tree) => {
+                *self.system_tree.borrow_mut() = tree.into_iter()
+                    .map(|group| group.into())
+                    .collect();
+                return Ok(())
             },
-            Err(system) => {
-                return Err(WorldSystemError::FailedToAddWorldSystem(system))
+            Err(e) => {
+                return Err(WorldSystemError::FailedToResolveSystemTree(e));
             }
         }
     }
     
+
+    /// Marks a dependency between a system and a component
+    ///
+    /// Dependencies are detected and resolved automatically at runtime
     fn mark_dependency(&self, dependency: DependencyType, system_id: SystemId, component_id: ComponentSetId) {
         debug!("marking new dependeny: system {:?} depends on component {:?}: {:?}", system_id, component_id, dependency);
         
+        if self.check_mid_frame_dependency(dependency, component_id) {
+
+        }
+
         todo!("implement me");
+        
         // determine if this new dependency invalidates the work on the current frame
         // there are three options:
         //  1. scrap the entire current frame, rebuild the system tree, and start over
         //  2. cancel this system only, let the frame finish, rebuild the system tree, and continue on the next frame
         //  3. don't scrap anything, proceed as normal, fall-back on a Mutex to protect memory (may lock up)
     }
+    
+    fn check_mid_frame_dependency(&self, dependency_type: DependencyType, component_id: ComponentSetId) -> bool {
+        match dependency_type {
+            DependencyType::Read => {
+                todo!()
+            },
+            DependencyType::Write => {
+                todo!()
+            },
+        }
+    }
 
-    pub fn queue_command(&self, command: WorldCommand) {
-        self.command_queue.borrow_mut().push(command);
-        
-        todo!("do something better here, probably get rid of the refcell around command_queue");
+    fn queue_command(&self, command: WorldCommand) {
+        self.command_queue.borrow_mut().push(command);    
+        warn!("do something better for queuing world commands");
     }
 
     #[allow(dead_code)]
@@ -241,8 +290,50 @@ impl World {
 }
 
 
+// An entity is created with id (0, 1)
+// a component A is added, it sits in component storage at index 0
+// the entity is destroyed, its components are removed from storage
+// some system attempts to get the entities A component, it gets None
+// a new entity is created, id (0, 2)
+// component A is added to entity (0, 2)
+// some system attempts to get entity (0, 1)'s component A...
+// if they do this through the world, we can filter on the entityid
+// by keeping the current version
+// no need to change component storage, keep it tight
+
+/// An opaque identifier for any given entity in the world. Corresponds to exactly one entity, alive or dead.
+///
+/// EntityId's can only ever be created by a world, and they are only legal within that world. It is a bug to
+/// read or decode an EntityId, as their internals may change at any time. The only valid operation outside
+/// for external code is equality comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityId(u64);
+
+impl Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl EntityId {
+    #[allow(dead_code)]
+    pub(in crate::world) fn new(idx: usize, gen: usize) -> Self {
+        EntityId(((gen as u64) << 32) | (idx as u64)) 
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::world) fn index(&self) -> usize {
+        (self.0 >> 32) as usize
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::world) fn generation(&self) -> usize {
+        (self.0 & 0xFFFFFFFF) as usize
+    }
+}
+
 pub struct EntityIdIter<'a> {
-    entities: &'a RefCell<Vec<EntityId>>,
+    entities: &'a SparseSet<EntityId>,
     idx: usize,
 }
 
@@ -250,7 +341,7 @@ impl<'a> Iterator for EntityIdIter<'a> {
     type Item = EntityId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entities = self.entities.borrow();
+        let entities = self.entities;
         self.idx += 1;
         entities.get(self.idx - 1).map(|x| *x)
     }
@@ -260,29 +351,31 @@ impl<'a> Iterator for EntityIdIter<'a> {
 pub struct LocalWorld<'a> {
     world: &'a World, 
     system_id: SystemId,
-    execution_id: Cell<SystemExecutionId>,
 }
 
 impl<'a> LocalWorld<'a> {
-    pub fn new_entity(&self) -> EntityId {
-        self.world.new_entity()
+    pub fn system_id(&self) -> SystemId {
+        self.system_id
+    }
+
+    /// Spawns a new Entity in the world, returning its ID
+    ///
+    /// An entity on its own does nothing, in fact, it practically doesn't exist. Only after
+    /// associating components with an entity does its existence mean anything
+    pub fn spawn_entity(&self) -> EntityId {
+        self.world.create_entity()
     }
 
     pub fn add_component<T: Debug + 'static>(&self, entity: EntityId, component: T) {
-        self.world.add_component::<T>(entity, component)
+        let component_id = ComponentSetId::of::<T>();
+        self.world.mark_dependency(DependencyType::Write, self.system_id(), component_id);
+        self.world.add_component::<T>(entity, component);
     }
 
     pub fn queue_command(&self, command: WorldCommand) {
         self.world.queue_command(command);
     }
 
-    pub fn entities(&self) -> EntityIdIter {
-        EntityIdIter {
-            entities: &self.world.entities,
-            idx: 0
-        }
-    }
-    
     pub(crate) unsafe fn get_component_set(&self, component_set_id: ComponentSetId) -> Option<*mut ComponentSet> {
         match self.world.components.get(component_set_id) {
             Some(cell) => {
@@ -295,11 +388,7 @@ impl<'a> LocalWorld<'a> {
         }
     }
 
-    pub(crate) fn system_execution_id(&self) -> SystemExecutionId {
-        self.execution_id.get()
-    }
-
-    pub(crate) fn cached_query_set(&self) -> std::collections::HashMap<SystemExecutionId, Query> {
+    pub(crate) fn cached_query_set(&self) -> std::collections::HashMap<SystemId, Query> {
         todo!()
     }
 
@@ -349,57 +438,31 @@ macro_rules! query_results {
 
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::query::IntoQueryIter;
+
+    fn hello_system(_: LocalWorld) -> Result<(), WorldSystemError> {
+        debug!("Hello from hello_system!");
+        Ok(())
+    }
+
+    fn goodbye_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
+        debug!("Goodbye from goodbye_system!");
+        local_world.queue_command(WorldCommand::Stop);
+        Ok(())
+    }
 
     #[test]
     fn hello_world() {
         let mut world = World::new();
 
-        fn hello_system(_: LocalWorld) -> Result<(), WorldSystemError> {
-            debug!("Hello from hello_system!");
-            Ok(())
-        }
-
-        fn goodbye_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
-            debug!("Goodbye from goodbye_system!");
-            local_world.queue_command(WorldCommand::Stop);
-            Ok(())
-        }
-
-        //world.add_system(&hello_system);
-        //world.add_system(&goodbye_system);
-        //world.run();
+        let _ = world.add_system(hello_system);
+        let _ = world.add_system(goodbye_system);
+        world.run();
     }
 
-    #[test]
-    fn add_components() {
-        let mut world = World::new();
-
-        fn entity_producer_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
-            for _ in 0..10 {
-                let entity = local_world.new_entity();
-                let component = 0usize;
-                local_world.add_component(entity, component);
-            }
-            Ok(())
-        }
-
-        fn float_producer_system(local_world: LocalWorld) -> Result<(), WorldSystemError> {
-            for entity in local_world.entities() {
-                let component = 0f32;
-                local_world.add_component(entity, component);
-            }
-            local_world.queue_command(WorldCommand::Stop);
-            Ok(())
-        }
-
-        //world.add_system(&entity_producer_system);
-        //world.add_system(&float_producer_system);
-        //world.run();
-    }
-    
     #[test]
     fn queries() {
         log!("");
@@ -410,13 +473,13 @@ mod tests {
 
             for i in 0..10 {
                 if i % 3 == 0 {
-                    let entity = local_world.new_entity();
+                    let entity = local_world.spawn_entity();
                     let float_component = i as f32 * 33.333;
                     let bool_component = i % 7 == 0;
                     local_world.add_component(entity, float_component);
                     local_world.add_component(entity, bool_component);
                 } else {
-                    let entity = local_world.new_entity();
+                    let entity = local_world.spawn_entity();
                     let int_component = i * 10;
                     let bool_component = i % 13 == 0;
                     local_world.add_component(entity, int_component);
@@ -465,17 +528,17 @@ mod tests {
         // 
 
         
-        //world.add_system(&entity_producer_system);
-        //world.add_system(&component_query_system);
-        //world.run();
+        let _ = world.add_system(entity_producer_system);
+        let _ = world.add_system(component_query_system);
+        world.run();
 
-        log!("-------------------------------------------------------");
-        log!("                   world data dump                     ");
-        log!("-------------------------------------------------------");
-        log!("{:#?}", world);
-        log!("-------------------------------------------------------");
-        log!("                 end world data dump                   ");
-        log!("-------------------------------------------------------");
+        //log!("-------------------------------------------------------");
+        //log!("                   world data dump                     ");
+        //log!("-------------------------------------------------------");
+        //log!("{:#?}", world);
+        //log!("-------------------------------------------------------");
+        //log!("                 end world data dump                   ");
+        //log!("-------------------------------------------------------");
 
     }
 
@@ -504,7 +567,6 @@ mod tests {
         let world = LocalWorld{
             system_id: SystemId::from(0),
             world: &dummy_world(),
-            execution_id: Cell::new(SystemExecutionId::unique()),
         };
         
         let _query = builder.make(&world);

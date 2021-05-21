@@ -1,4 +1,11 @@
-use std::{cell::UnsafeCell, fmt::Debug, ops::{Deref, DerefMut}, sync::{MutexGuard, RwLockReadGuard}};
+/// Query
+
+// TODO: - Executing queries currently uses a fair amount of unsafe code, this could be a good target for
+//         improvement in the future
+//       - More complex queries, spatial constraints, time constraints
+//       - Query caching
+
+use std::{fmt::Debug, ops::{Deref, DerefMut}};
 
 use crate::{collections::{Get}, components::{Component, ComponentSet, ComponentSetId}, debug::*, world::{IntoCoordinate, LocalWorld}};
 use crate::systems::DependencyType;
@@ -154,7 +161,7 @@ impl<'a> Query<'a> {
     }
     
     pub fn cached(local_world: &'a LocalWorld) -> QueryBuilder<'a> {
-        if local_world.cached_query_set().contains_key(&local_world.system_execution_id()) {
+        if local_world.cached_query_set().contains_key(&local_world.system_id()) {
             // we've cached this query, fetch and return it
             todo!()
         } else {
@@ -176,7 +183,7 @@ impl<'a> Query<'a> {
     /// which satisfy mutability rules
     unsafe fn get_required_components<'b>(&self) -> Vec<*mut ComponentSet> {
         let mut components = Vec::new();
-        
+
         for component_set_id in self.components.iter() {
             match self.world.get_component_set(*component_set_id) {
                 Some(guard) => {
@@ -240,7 +247,7 @@ macro_rules! impl_into_query_iter {
                         let __macro_invocation_component_id = ComponentSetId::of::<$comp>();
                         
                         // UNSAFE POINTER DEREFERENCE. WILL BREAK THINGS IF THIS FUNCTION IS USED IMPORPERLY
-                        let __required_component_id = (**__required_component).component_set_id();
+                        let __required_component_id = (**__required_component).id();
 
                         if __required_component_id == __macro_invocation_component_id {
 
@@ -268,9 +275,21 @@ macro_rules! impl_into_query_iter {
 
                 // the if let here expands into a tuple of Some()'s, this is shorthand for "do we have all of the components we asked for?"
                 if let ($(Some($comp)),*) = __ordered_components {
-
                     // figure out which component in our ordered set has the fewest elements, it's the anchor for iteration
-                    __iter.min_set_index = [$($comp.len()),*].iter().enumerate().min_by_key(|(_, &v)| v).expect("slice is not empty").0;
+
+                    // this expands into an iterable array of the number of components in each set, we then get the index of the set
+                    // with the fewest number of components in it, __iter.min_set_index is then assigned to this index
+                    __iter.min_set_index = match [$($comp.len()),*].iter().enumerate().min_by_key(|(_idx, &len)| {
+                        len // min by key is interested in the number of components in the set
+                    }) {
+                        Some(item) => {
+                            item.0 // our item created by enumerate() is a (idx, len) for each component, we want the index
+                        },
+                        None => {
+                            todo!("better error handling here");
+                        }
+                    };
+
                     match __iter.min_set_index {
                         $(
                             $index => {
@@ -296,7 +315,7 @@ macro_rules! impl_into_query_iter {
                     }
                 } else {
                     todo!("don't make this a fatal error, log the error and return an empty iterator. don't want engine crashing all of the time");
-                    fatal!("Unable to populate QueryIter with all required components: {:?}", __ordered_components);
+                    //fatal!("Unable to populate QueryIter with all required components: {:?}", __ordered_components);
                 }
 
                 // return the finished iterator
@@ -351,7 +370,7 @@ macro_rules! impl_query_iter {
                             let __component = unsafe { (*self.ordered_components[$index]).raw_set_unchecked::<$comp>().get(entity_id) };
 
                             if let Some(__component) = __component {
-                                Ref::new(__component, Some(self.world)) // !!!!!!!!! TODO: Need some better mechanism for quickly setting a write dep and checking it
+                                Ref::new(__component.get(), Some(self.world)) // TODO: Need some better mechanism for quickly setting a write dep and checking it
                             } else {
                                 return None; // early return
                             }
@@ -386,7 +405,7 @@ impl_query_iter!([A, 0]; [B, 1]; [C, 2]; [D, 3]; [E, 4]; [F, 5]);
 /// that some running systems data may be invalidated and must be calculated again
 #[derive(Debug)]
 pub struct Ref<'a, T> {
-    target: &'a UnsafeCell<T>,
+    target: *mut T,
 
     // Some if the reference is used as immutable, None if the system is known to mutate this component
     // 
@@ -396,7 +415,7 @@ pub struct Ref<'a, T> {
 }
 
 impl<'a, T> Ref<'a, T> {
-    fn new(item: &'a UnsafeCell<T>, world: Option<&'a LocalWorld>) -> Self {
+    fn new(item: *mut T, world: Option<&'a LocalWorld>) -> Self {
         Ref {
             target: item,
             world: world,
@@ -410,7 +429,7 @@ impl<'a, T> Deref for Ref<'a, T> where T: Component {
         // Read dependencies are implicit based on the inclusion of a component in a query, thus we don't need to check here
         unsafe {
             // Safety: Our pointer is into SparseSet<UnsafeCell<T>>::data, these are owned values and the data is guaranteed to be non-null
-            &*(self.target.get())
+            &*(self.target)
         }
     }
 }
@@ -421,13 +440,14 @@ impl<'a, T> DerefMut for Ref<'a, T> where T: Component  {
         // Write dependencies are more complicated, they are lazy and must be marked the very first time a given system
         // uses a component mutably. This only happens once for the life of the system.
         if let Some(world) = self.world {
-            debug!("marking write dependency for {:?} in system {:?}", std::any::type_name::<T>(), world.system_execution_id());
+            //debug!("marking write dependency for {:?} in system {:?}", std::any::type_name::<T>(), world.system_execution_id());
             world.mark_dependency(DependencyType::Write, ComponentSetId::of::<T>());
         }
         
         unsafe {
-            &mut *(self.target.get())
+            &mut (*self.target)
         }
+
         // If this is the first time mutably dereferencing from this system, flag the system
         // as mutably borrowing the specified component and rebuild the dependency graph.
         // Otherwise, we've already flagged this and we can just return the mutable reference

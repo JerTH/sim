@@ -73,13 +73,11 @@ impl<N: ConflictCmp> ConflictGraph<N> {
     /// Insert a new node
     /// ConflictGraph only supports insertion, it does not support removal or access to its contents, it is not a container
     pub fn insert(&mut self, node: N) -> Result<(), ConflictGraphError> {
-        let _ = self.nodes
-            .insert(InnerNode::new(node))
-            .map_err(|result| ConflictGraphError::InsertFailed)?;
+        let _key = self.nodes.insert(InnerNode::new(node));
 
         Ok(())
     }
-
+    
     /// Consumes the conflict graph and returns a set of conflict-free cliques as a Vec<Vec<N>>
     /// 
     /// Each inner Vec represents a group of items which do not conflict with one another based on their ConflictCmp implementation

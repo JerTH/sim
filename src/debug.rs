@@ -95,6 +95,7 @@ struct DefaultLogSink {}
 
 impl DefaultLogSink {
     fn new() -> Self {
+        println!();
         Self {}
     }
 }
@@ -113,35 +114,49 @@ impl LogSink for DefaultLogSink {
                 format!("{}", message.contents.type_string())
             }
         };
-        
-        //println!("\x1b[1;31mbold red text\x1b[0m");
-        //println!("\x1b[1;93mbold yellow text\x1b[0m");
-        
+
         let time_string = format!("{}.{}", time_seconds, time_subsec);
 
-        //let contents = "test message";
-        //println!("\n{time} - {cont}", time=time_string, cont=contents);
-        //println!("{time} [\x1b[0;35m{ctx}\x1b[0m] - {cont}", ctx="debug:testmodule", time=time_string, cont=contents);
-        //println!("{time} [\x1b[0;33m{ctx}\x1b[0m] - {cont}", ctx="warning:testmodule", time=time_string, cont=contents);
-        //println!("{time} [\x1b[0;31m{ctx}\x1b[0m] - {cont}", ctx="error:testmodule", time=time_string, cont=contents);
-        //println!("\x1b[0;41m{time} [{ctx}] - {cont}\x1b[0m", ctx="fatal:testmodule".to_uppercase(), time=time_string, cont=contents.to_uppercase());
-        //println!("closing log channel");
+        let module_string = message.module;
 
         match &message.contents {
             LogMessageContents::Log(contents) => {
-                println!("{time} - {cont}", time=time_string, cont=contents);
+                println!("{time} [{ctx}] - {cont}",
+                    time=time_string,
+                    ctx=context_string,
+                    cont=contents
+                );
             },
             LogMessageContents::Debug(contents) => {
-                println!("{time} [\x1b[0;35m{ctx}\x1b[0m] - {cont}", ctx=context_string, time=time_string, cont=contents);
+                println!("{time} [\x1b[0;35m{ctx}\x1b[0m] - {cont}",
+                    ctx=context_string,
+                    time=time_string,
+                    cont=contents
+                );
             },
             LogMessageContents::Warn(contents) => {
-                println!("{time} [\x1b[0;33m{ctx}\x1b[0m] - {cont}", ctx=context_string, time=time_string, cont=contents);
+                println!("{time} [\x1b[0;33m{ctx}/{mod}\x1b[0m] - {cont}",
+                    ctx=context_string,
+                    time=time_string,
+                    cont=contents,
+                    mod=module_string
+                );
             },
             LogMessageContents::Error(contents) => {
-                println!("{time} [\x1b[0;31m{ctx}\x1b[0m] - {cont}", ctx=context_string, time=time_string, cont=contents);
+                println!("{time} [\x1b[0;31m{ctx}/{mod}\x1b[0m] - {cont}",
+                    ctx=context_string,
+                    time=time_string,
+                    cont=contents,
+                    mod=module_string
+                );
             }
             LogMessageContents::Fatal(contents) => {
-                println!("\x1b[1;41m{time} [{ctx}] - {cont}\x1b[0m", ctx=context_string.to_uppercase(), time=time_string, cont=contents.to_uppercase());
+                println!("\x1b[1;41m{time} [{ctx}/{mod}] - {cont}\x1b[0m",
+                    ctx=context_string.to_uppercase(),
+                    time=time_string,
+                    cont=contents.to_uppercase(),
+                    mod=module_string
+                );
             },
             LogMessageContents::Close => {
                 // do nothing
@@ -197,8 +212,8 @@ static mut LOG_SINK: Cell<Option<Mutex<Box<dyn LogSink>>>> = Cell::new(None);
 struct RecvGuardTunnel<'a>(MutexGuard<'a, Receiver<LogMessage>>);
 unsafe impl<'a> Send for RecvGuardTunnel<'a> {}
 
-/// Reciever thread function. There should only ever be one of these running
-fn log_reciever_fn(guard_tunnel: RecvGuardTunnel) -> RecvGuardTunnel {
+/// receiver thread function. There should only ever be one of these running
+fn log_receiver_fn(guard_tunnel: RecvGuardTunnel) -> RecvGuardTunnel {
     let receiver_guard = guard_tunnel.0;
 
     loop {
@@ -265,8 +280,8 @@ pub unsafe fn get_log_channel() -> Sender<LogMessage> {
         // Setup the log sink
         set_log_sink(Box::new(DefaultLogSink::new()));
 
-        // Spawn the reciever thread
-        let handle = thread::spawn(move || log_reciever_fn(guard_tunnel));
+        // Spawn the receiver thread
+        let handle = thread::spawn(move || log_receiver_fn(guard_tunnel));
 
         LOG_RECEIVER_JOIN_HANDLE.set(Some(handle));
     }); // end of LOG_INIT_ONCE
@@ -435,8 +450,8 @@ macro_rules! fatal {
 
             // hack to allow pending log messages to (hopefully) post before we kill the process
             ::std::thread::sleep(::std::time::Duration::from_millis(100)); 
-            panic!()
         });
+        panic!($($arg)*);
     }
 }
 
